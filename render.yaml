@@ -1,11 +1,13 @@
 services:
   - type: web
-    name: kanha-engine
+    name: kanha-fishing
     runtime: python
     plan: free
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --worker-class sync --threads 4
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: BOT_TOKEN
         sync: false
       - key: API_ID
@@ -14,5 +16,3 @@ services:
         sync: false
       - key: OWNER_ID
         sync: false
-      - key: PYTHON_VERSION
-        value: 3.11.9

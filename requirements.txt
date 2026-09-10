@@ -3,5 +3,4 @@ telethon==1.36.0
 pyTelegramBotAPI==4.14.0
 requests==2.31.0
 gunicorn==21.2.0
-cryptg==0.4.0
 APScheduler==3.10.4

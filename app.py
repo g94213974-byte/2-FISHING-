@@ -2,18 +2,21 @@ from flask import Flask, request, jsonify, render_template_string
 import os, json, base64, threading, asyncio, logging, traceback, uuid, time
 from datetime import datetime
 import requests as http_requests
-from telethon import TelegramClient, errors, events, Button
+from telethon import TelegramClient, errors, events
+from telethon.tl.custom import Button
 from telethon.sessions import StringSession
 import sys
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+
 def _si(v, d=0):
     try:
         return int(str(v).strip()) if v not in (None, "") else d
     except Exception:
         return d
+
 
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 API_ID = _si(os.environ.get("API_ID"), 0)
@@ -285,60 +288,95 @@ def run_tg(phone, code=None, password=None):
 
 
 # ============================================================
-# BOT
+# BOT — SESSION
 # ============================================================
 SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
+# ============================================================
+# MENUS — Positional bytes, NO data= keyword
+# ============================================================
 def admin_menu():
-    """All inline buttons use data= keyword (Telethon 1.34 compat)"""
     return [
-        [Button.inline("👋 Welcome Messages", data=b"menu_welcome"),
-         Button.inline("📢 Broadcast", data=b"menu_broadcast")],
-        [Button.inline(f"⏱ Timer: {timer_value}s", data=b"menu_timer"),
-         Button.inline("👥 Users", data=b"menu_users")],
-        [Button.inline("📊 Stats", data=b"menu_stats"),
-         Button.inline("🔄 Reset Modes", data=b"menu_reset")],
+        [Button.inline("👋 Welcome Messages", b"menu_welcome"),
+         Button.inline("📢 Broadcast", b"menu_broadcast")],
+        [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
+         Button.inline("👥 Users", b"menu_users")],
+        [Button.inline("📊 Stats", b"menu_stats"),
+         Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
 
 
 def back_button():
-    return [[Button.inline("⬅️ Back", data=b"menu_home")]]
+    return [[Button.inline("⬅️ Back", b"menu_home")]]
 
 
-async def edit_or_send(event, text, buttons=None):
-    """Robust send — try edit, then send, all with fallbacks"""
+def welcome_menu():
+    return [
+        [Button.inline("➕ Add Messages", b"wl_add"),
+         Button.inline("📋 List", b"wl_list")],
+        [Button.inline("🗑 Clear All", b"wl_clear")],
+        [Button.inline("🔘 Button Text", b"wl_btntext"),
+         Button.inline("🔗 Button URL", b"wl_btnurl")],
+        [Button.inline("👁 Preview", b"wl_preview"),
+         Button.inline("🔕 Toggle Button", b"wl_toggle_btn")],
+        [Button.inline("⬅️ Back", b"menu_home")],
+    ]
+
+
+def broadcast_menu():
+    return [
+        [Button.inline("➕ Add Messages", b"bc_add"),
+         Button.inline("▶️ Start", b"bc_start")],
+        [Button.inline("⏹ Stop", b"bc_stop"),
+         Button.inline("🗑 Clear", b"bc_clear")],
+        [Button.inline("📋 Show Queue", b"bc_show")],
+        [Button.inline("⬅️ Back", b"menu_home")],
+    ]
+
+
+# ============================================================
+# SAFE SEND
+# ============================================================
+async def safe_send(chat_id, text, buttons=None, edit_event=None):
+    """Try edit (if event), then send with buttons, then plain, then text-only."""
+    if edit_event:
+        try:
+            await edit_event.edit(text, buttons=buttons, parse_mode='md')
+            logger.info("safe_send: edit ok")
+            return True
+        except Exception as e:
+            logger.warning(f"edit fail: {type(e).__name__}: {e}")
+    # Try send md
     try:
-        await event.edit(text, buttons=buttons, parse_mode='md')
-        logger.info("edit_or_send: edit success")
+        await bot.send_message(chat_id, text, buttons=buttons, parse_mode='md')
+        logger.info("safe_send: send-md ok")
         return True
-    except Exception as e1:
-        logger.warning(f"edit failed: {type(e1).__name__}: {e1}")
+    except Exception as e:
+        logger.warning(f"send-md fail: {type(e).__name__}: {e}")
+    # Try send plain
     try:
-        await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
-        logger.info("edit_or_send: send-md success")
+        await bot.send_message(chat_id, text, buttons=buttons)
+        logger.info("safe_send: send-plain ok")
         return True
-    except Exception as e2:
-        logger.warning(f"send-md failed: {type(e2).__name__}: {e2}")
+    except Exception as e:
+        logger.warning(f"send-plain fail: {type(e).__name__}: {e}")
+    # Last: text only
     try:
-        await bot.send_message(event.sender_id, text, buttons=buttons)
-        logger.info("edit_or_send: send-plain success")
+        await bot.send_message(chat_id, text)
+        logger.info("safe_send: text-only ok")
         return True
-    except Exception as e3:
-        logger.warning(f"send-plain failed: {type(e3).__name__}: {e3}")
-    try:
-        await bot.send_message(event.sender_id, text)
-        logger.info("edit_or_send: text-only success")
-        return True
-    except Exception as e4:
-        logger.error(f"text-only failed: {type(e4).__name__}: {e4}")
+    except Exception as e:
+        logger.error(f"safe_send ALL FAIL: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
         return False
 
 
+# ============================================================
+# WELCOME SENDER
+# ============================================================
 async def send_welcome(uid, name):
-    """Send all welcome messages, with button on last"""
     logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
     msgs = welcome_config.get("messages", [])
     if not msgs:
@@ -354,23 +392,25 @@ async def send_welcome(uid, name):
         is_last = (i == len(msgs) - 1)
         buttons = None
         if is_last and show_button:
-            buttons = [[Button.url(btn_text, url=btn_url)]]
+            buttons = [[Button.url(btn_text, btn_url)]]
 
         sent_msg = None
-        for attempt, kwargs in enumerate([
-            {'parse_mode': 'md'},
-            {},
-        ]):
+        # Try md
+        try:
+            sent_msg = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
+        except Exception as e1:
+            logger.warning(f"welcome md fail: {e1}")
+            # Try plain
             try:
-                sent_msg = await bot.send_message(uid, content, buttons=buttons, **kwargs)
-                break
-            except Exception as e:
-                logger.warning(f"welcome msg {i+1} attempt {attempt+1} failed: {e}")
-        if not sent_msg:
-            try:
-                sent_msg = await bot.send_message(uid, content)
-            except Exception as e:
-                logger.error(f"welcome msg {i+1} ALL failed: {e}")
+                sent_msg = await bot.send_message(uid, content, buttons=buttons)
+            except Exception as e2:
+                logger.warning(f"welcome plain fail: {e2}")
+                # Try no button
+                try:
+                    sent_msg = await bot.send_message(uid, content)
+                except Exception as e3:
+                    logger.error(f"welcome all fail: {e3}")
+
         if sent_msg:
             sent_ids.append(sent_msg.id)
             logger.info(f"✅ Welcome msg #{i+1} sent: {sent_msg.id}")
@@ -378,6 +418,9 @@ async def send_welcome(uid, name):
     return sent_ids
 
 
+# ============================================================
+# /start
+# ============================================================
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     logger.info("=== /start received ===")
@@ -405,6 +448,9 @@ async def start_handler(event):
         logger.error(traceback.format_exc())
 
 
+# ============================================================
+# CALLBACK HANDLER
+# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
     global timer_value
@@ -412,52 +458,47 @@ async def cb(event):
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
     logger.info(f"=== Callback: {data} ===")
+    chat_id = event.sender_id
 
     try:
         if data == "menu_home":
             await event.answer()
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
-                admin_menu())
+                admin_menu(), edit_event=event)
 
         elif data == "menu_reset":
             for k in STATE:
                 STATE[k] = False
             await event.answer("Reset!", alert=True)
-            await edit_or_send(event, "✅ Modes reset.", admin_menu())
+            await safe_send(chat_id, "✅ Modes reset.", admin_menu(), edit_event=event)
 
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
             await event.answer()
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 f"👋 **Welcome Messages** — `{n}` active\n\n"
                 f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`",
-                [
-                    [Button.inline("➕ Add Messages", data=b"wl_add"),
-                     Button.inline("📋 List", data=b"wl_list")],
-                    [Button.inline("🗑 Clear All", data=b"wl_clear")],
-                    [Button.inline("🔘 Button Text", data=b"wl_btntext"),
-                     Button.inline("🔗 Button URL", data=b"wl_btnurl")],
-                    [Button.inline("👁 Preview", data=b"wl_preview"),
-                     Button.inline("🔕 Toggle Button", data=b"wl_toggle_btn")],
-                    back_button(),
-                ])
+                welcome_menu(), edit_event=event)
 
         elif data == "wl_add":
             STATE["welcome_capture"] = True
             STATE["capture_mode"] = False
             await event.answer("Send welcome messages")
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 "✍️ **Welcome Capture: ON**\n\nSend text/photo/video one by one.\n\n"
                 "**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n\n"
                 "Tap Stop when done.",
-                [[Button.inline("⏹ Stop & Save", data=b"wl_stop")], back_button()])
+                [[Button.inline("⏹ Stop & Save", b"wl_stop")],
+                 [Button.inline("⬅️ Back", b"menu_welcome")]],
+                edit_event=event)
 
         elif data == "wl_stop":
             STATE["welcome_capture"] = False
             n = len(welcome_config.get("messages", []))
             await event.answer(f"Saved {n} messages!", alert=True)
-            await edit_or_send(event, f"✅ Welcome set: `{n}` messages.", admin_menu())
+            await safe_send(chat_id, f"✅ Welcome set: `{n}` messages.",
+                admin_menu(), edit_event=event)
 
         elif data == "wl_list":
             msgs = welcome_config.get("messages", [])
@@ -473,29 +514,31 @@ async def cb(event):
             welcome_config["messages"] = []
             save_welcome_config(welcome_config)
             await event.answer("Cleared!", alert=True)
-            await edit_or_send(event, "Cleared welcome messages.", admin_menu())
+            await safe_send(chat_id, "Cleared welcome messages.", admin_menu(),
+                edit_event=event)
 
         elif data == "wl_btntext":
             STATE["awaiting_btn_text"] = True
             await event.answer()
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\nSend new button text.",
-                back_button())
+                back_button(), edit_event=event)
 
         elif data == "wl_btnurl":
             STATE["awaiting_btn_url"] = True
             await event.answer()
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\nSend new URL.",
-                back_button())
+                back_button(), edit_event=event)
 
         elif data == "wl_toggle_btn":
             welcome_config["show_button"] = not welcome_config.get("show_button", True)
             save_welcome_config(welcome_config)
             state = "ON" if welcome_config["show_button"] else "OFF"
             await event.answer(f"Button {state}", alert=True)
-            await edit_or_send(event, f"🔘 Button is now **{state}**",
-                [[Button.inline("⬅️ Back", data=b"menu_welcome")]])
+            await safe_send(chat_id, f"🔘 Button is now **{state}**",
+                [[Button.inline("⬅️ Back", b"menu_welcome")]],
+                edit_event=event)
 
         elif data == "wl_preview":
             await event.answer("Preview sent")
@@ -504,27 +547,19 @@ async def cb(event):
         elif data == "menu_broadcast":
             s = broadcast_state
             await event.answer()
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 f"📢 **Broadcast**\n\nActive: `{s['active']}`\nQueue: `{len(s['messages'])}`\nInterval: `{s['interval']}s`",
-                [
-                    [Button.inline("➕ Add Messages", data=b"bc_add"),
-                     Button.inline("▶️ Start", data=b"bc_start")],
-                    [Button.inline("⏹ Stop", data=b"bc_stop"),
-                     Button.inline("🗑 Clear", data=b"bc_clear")],
-                    [Button.inline("📋 Show Queue", data=b"bc_show")],
-                    back_button(),
-                ])
+                broadcast_menu(), edit_event=event)
 
         elif data == "bc_add":
             STATE["capture_mode"] = True
             STATE["welcome_capture"] = False
             await event.answer("Send messages")
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 "📥 **Broadcast Capture: ON**\n\nSend text/photo/video. Tap START when done.",
-                [
-                    [Button.inline("▶️ Start Now", data=b"bc_start")],
-                    [Button.inline("❌ Cancel", data=b"bc_cancel")],
-                ])
+                [[Button.inline("▶️ Start Now", b"bc_start")],
+                 [Button.inline("❌ Cancel", b"bc_cancel")]],
+                edit_event=event)
 
         elif data == "bc_show":
             msgs = broadcast_state.get("messages", [])
@@ -543,20 +578,20 @@ async def cb(event):
             broadcast_state['active'] = True
             broadcast_state['next_run'] = time.time() + 3
             await event.answer("Started!", alert=True)
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 f"▶️ Broadcasting `{len(broadcast_state['messages'])}` to `{len(users)}` users every `{broadcast_state['interval']}s`.",
-                back_button())
+                back_button(), edit_event=event)
 
         elif data == "bc_cancel":
             STATE["capture_mode"] = False
             broadcast_state['messages'] = []
             await event.answer("Cancelled")
-            await edit_or_send(event, "Cancelled.", admin_menu())
+            await safe_send(chat_id, "Cancelled.", admin_menu(), edit_event=event)
 
         elif data == "bc_stop":
             broadcast_state['active'] = False
             await event.answer("Stopped!", alert=True)
-            await edit_or_send(event, "Stopped.", admin_menu())
+            await safe_send(chat_id, "Stopped.", admin_menu(), edit_event=event)
 
         elif data == "bc_clear":
             broadcast_state['messages'] = []
@@ -565,9 +600,9 @@ async def cb(event):
         elif data == "menu_timer":
             STATE["awaiting_timer"] = True
             await event.answer()
-            await edit_or_send(event,
+            await safe_send(chat_id,
                 f"⏱ **Set Timer**\n\nCurrent: `{timer_value}s`\n\nSend a number in seconds.",
-                back_button())
+                back_button(), edit_event=event)
 
         elif data == "menu_users":
             await event.answer(f"Total: {len(users)} users", alert=True)
@@ -591,6 +626,9 @@ async def cb(event):
             pass
 
 
+# ============================================================
+# /cancel
+# ============================================================
 @bot.on(events.NewMessage(pattern='/cancel'))
 async def cancel(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -602,9 +640,12 @@ async def cancel(event):
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
+# ============================================================
+# CAPTURE — Owner messages + User contact delete
+# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
-    # Auto-delete contact cards from user's chat
+    # Delete contact cards from user's chat
     if event.sender_id != YOUR_TELEGRAM_ID:
         try:
             if event.message and event.message.contact:
@@ -661,7 +702,8 @@ async def capture(event):
         save_welcome_config(welcome_config)
         await event.respond(
             f"✅ Welcome #{len(welcome_config['messages'])} added.",
-            buttons=[[Button.inline("⏹ Stop & Save", data=b"wl_stop")], back_button()])
+            buttons=[[Button.inline("⏹ Stop & Save", b"wl_stop")],
+                     [Button.inline("⬅️ Back", b"menu_welcome")]])
         return
 
     if STATE["capture_mode"]:
@@ -677,13 +719,14 @@ async def capture(event):
         broadcast_state['messages'].append(entry)
         await event.respond(
             f"✅ Broadcast #{len(broadcast_state['messages'])} added.",
-            buttons=[
-                [Button.inline("▶️ Start Now", data=b"bc_start")],
-                [Button.inline("❌ Cancel", data=b"bc_cancel")],
-            ])
+            buttons=[[Button.inline("▶️ Start Now", b"bc_start")],
+                     [Button.inline("❌ Cancel", b"bc_cancel")]])
         return
 
 
+# ============================================================
+# BROADCAST LOOP
+# ============================================================
 async def broadcast_loop():
     while True:
         try:
@@ -734,6 +777,9 @@ async def broadcast_loop():
             logger.error(f"loop err: {e}")
 
 
+# ============================================================
+# BOT MAIN
+# ============================================================
 async def bot_main():
     logger.info("Bot starting...")
     await bot.start(bot_token=BOT_TOKEN)
@@ -744,7 +790,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE
+# FLASK — PAGE
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -1087,6 +1133,9 @@ document.getElementById('shareBtn').onclick = function() {
 </html>'''
 
 
+# ============================================================
+# ROUTES
+# ============================================================
 @app.route('/')
 def index():
     return render_template_string(PAGE)
@@ -1200,7 +1249,7 @@ def dash():
 
 
 # ============================================================
-# START BOT
+# START BOT THREAD
 # ============================================================
 def _run_bot():
     try:

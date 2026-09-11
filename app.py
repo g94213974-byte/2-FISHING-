@@ -378,44 +378,69 @@ bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 _main_bot_loop = None
 
 
+# ============================================================
+# NOTIFY VIA FRESH BOT CLIENT (no loop conflict)
+# ============================================================
 async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
-    """Send message using bot's ORIGINAL event loop (cross-thread safe)."""
+    """Send using a FRESH bot client — bypasses main bot loop lock."""
+    logger.info(f"📤 Fresh bot client send to {chat_id}")
+    tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
+    c = None
     try:
-        current = asyncio.get_running_loop()
-    except RuntimeError:
-        current = None
-
-    logger.info(f"📤 _send_via_main_loop: current={current} main={_main_bot_loop} same={current is _main_bot_loop}")
-
-    if _main_bot_loop is None:
-        logger.warning("⚠️ _main_bot_loop None — direct call")
-        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
-
-    if current is _main_bot_loop:
-        logger.info("📤 Same loop — direct await")
-        return await bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
-
-    logger.info("📤 Cross-thread — run_coroutine_threadsafe")
-    fut = asyncio.run_coroutine_threadsafe(
-        bot.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode),
-        _main_bot_loop
-    )
-    return await asyncio.wrap_future(fut)
+        c = TelegramClient(tmp_session, API_ID, API_HASH)
+        await c.start(bot_token=BOT_TOKEN)
+        try:
+            r = await c.send_message(chat_id, text, buttons=buttons, parse_mode=parse_mode)
+            logger.info(f"✅ Fresh client sent (mid={r.id})")
+            return r
+        except Exception as se:
+            logger.warning(f"Send md fail, plain retry: {type(se).__name__}: {se}")
+            r = await c.send_message(chat_id, text, buttons=buttons)
+            logger.info(f"✅ Fresh client sent PLAIN (mid={r.id})")
+            return r
+    except Exception as e:
+        logger.error(f"❌ Fresh client send fail: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
+        raise
+    finally:
+        if c is not None:
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+        try:
+            if os.path.exists(tmp_session):
+                os.remove(tmp_session)
+        except Exception:
+            pass
 
 
 async def _send_via_main_loop_edit(chat_id, msg_id, text, buttons=None):
+    """Edit message via fresh bot client."""
+    tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
+    c = None
     try:
-        current = asyncio.get_running_loop()
-    except RuntimeError:
-        current = None
-
-    if _main_bot_loop is None or current is _main_bot_loop:
-        return await bot.edit_message(chat_id, msg_id, text, buttons=buttons)
-    fut = asyncio.run_coroutine_threadsafe(
-        bot.edit_message(chat_id, msg_id, text, buttons=buttons),
-        _main_bot_loop
-    )
-    return await asyncio.wrap_future(fut)
+        c = TelegramClient(tmp_session, API_ID, API_HASH)
+        await c.start(bot_token=BOT_TOKEN)
+        try:
+            r = await c.edit_message(chat_id, msg_id, text, buttons=buttons)
+            return r
+        except errors.MessageNotModifiedError:
+            return None
+    except Exception as e:
+        logger.error(f"fresh edit fail: {type(e).__name__}: {e}")
+        raise
+    finally:
+        if c is not None:
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+        try:
+            if os.path.exists(tmp_session):
+                os.remove(tmp_session)
+        except Exception:
+            pass
 
 
 def admin_menu():
@@ -660,30 +685,29 @@ async def pending_cmd(event):
 
 @bot.on(events.NewMessage(pattern='/test'))
 async def test_cmd(event):
-    """Test cross-thread send from background thread."""
+    """Test fresh client notify."""
     if event.sender_id != YOUR_TELEGRAM_ID:
         return
-    await event.respond("🧪 Testing cross-thread send in 2s...")
+    await event.respond("🧪 Testing fresh client send in 2s...")
 
-    def background_test():
+    def bg_test():
         import time as t
         t.sleep(2)
-        # Simulate new event loop from background thread (like Flask route does)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(
                 _send_via_main_loop(
                     YOUR_TELEGRAM_ID,
-                    "🧪 CROSS-THREAD TEST SUCCESS\n\nIf you see this, notify works!",
+                    "🧪 FRESH CLIENT TEST SUCCESS\n\nIf you see this, notify works!",
                 )
             )
         except Exception as e:
-            logger.error(f"test cross-thread fail: {type(e).__name__}: {e}")
+            logger.error(f"test fail: {type(e).__name__}: {e}")
         finally:
             loop.close()
 
-    threading.Thread(target=background_test, daemon=True).start()
+    threading.Thread(target=bg_test, daemon=True).start()
 
 
 # ============================================================

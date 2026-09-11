@@ -40,8 +40,6 @@ logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
 logger.info(f"  API_ID     : {API_ID}")
 logger.info(f"  API_HASH   : {'SET' if API_HASH else 'MISSING'}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
-logger.info(f"  WEBAPP_URL : {WEBAPP_URL}")
-logger.info(f"  SELF_URL   : {SELF_URL}")
 logger.info("=" * 60)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
@@ -79,33 +77,32 @@ AUTO_DELETE_EXPIRED = True
 
 
 # ============================================================
-# MARKDOWN V1 → HTML
+# MARKDOWN → HTML
 # ============================================================
 def md_to_html(text):
     if not text:
         return text
+    # Handle quote lines FIRST (before HTML escape)
     lines = text.split("\n")
     out_lines = []
     for line in lines:
         stripped = line.lstrip()
         if stripped.startswith("> "):
             content = stripped[2:].strip()
-            out_lines.append(f"<blockquote>{content}</blockquote>")
+            out_lines.append(f"@@BLOCKQUOTE_START@@{content}@@BLOCKQUOTE_END@@")
         else:
             out_lines.append(line)
     text = "\n".join(out_lines)
-    # Escape remaining HTML special chars (after quote processing)
+    # Escape HTML
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Apply formatting
     text = re.sub(r'```(.+?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
-    text = re.sub(r'`([^`]+?)`', r'<code>\1</code>', text)
+    text = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', text)
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'__(.+?)__', r'<i>\1</i>', text)
-    # Fix escaped quote tags that we generated
-    text = text.replace("&lt;blockquote&gt;", "<blockquote>").replace("&lt;/blockquote&gt;", "</blockquote>")
-    text = text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>")
-    text = text.replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
-    text = text.replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
-    text = text.replace("&lt;pre&gt;", "<pre>").replace("&lt;/pre&gt;", "</pre>")
+    # Restore blockquotes
+    text = text.replace("@@BLOCKQUOTE_START@@", "<blockquote>")
+    text = text.replace("@@BLOCKQUOTE_END@@", "</blockquote>")
     return text
 
 
@@ -326,7 +323,7 @@ def run_tg(phone, code=None, password=None):
 
 
 # ============================================================
-# BOT
+# BOT — FLAT MENUS (no nested lists)
 # ============================================================
 SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
@@ -346,7 +343,7 @@ def admin_menu():
 
 
 def back_button():
-    return [[Button.inline("⬅️ Back", b"menu_home")]]
+    return [Button.inline("⬅️ Back", b"menu_home")]
 
 
 def welcome_menu():
@@ -373,32 +370,25 @@ def broadcast_menu():
     ]
 
 
-# ============================================================
-# SAFE SEND — with MessageNotModifiedError handling
-# ============================================================
 async def safe_send(chat_id, text, buttons=None, edit_event=None):
     if edit_event:
         try:
             await edit_event.edit(text, buttons=buttons, parse_mode='md')
             return True
         except errors.MessageNotModifiedError:
-            logger.info("safe_send: content not modified (ok)")
             return True
         except Exception as e:
             logger.warning(f"edit fail: {type(e).__name__}: {e}")
-    # Try md
     try:
         await bot.send_message(chat_id, text, buttons=buttons, parse_mode='md')
         return True
     except Exception as e:
         logger.warning(f"send-md fail: {type(e).__name__}: {e}")
-    # Try plain
     try:
         await bot.send_message(chat_id, text, buttons=buttons)
         return True
     except Exception as e:
         logger.warning(f"send-plain fail: {type(e).__name__}: {e}")
-    # Text only
     try:
         await bot.send_message(chat_id, text)
         return True
@@ -408,21 +398,17 @@ async def safe_send(chat_id, text, buttons=None, edit_event=None):
 
 
 async def safe_send_user(uid, text, buttons=None):
-    """Send to user — HTML for bold/quote support"""
     html_text = md_to_html(text)
-    # Try HTML first
     try:
         sent = await bot.send_message(uid, html_text, buttons=buttons, parse_mode='html')
         return sent
     except Exception as e1:
         logger.warning(f"HTML fail: {type(e1).__name__}: {e1}")
-    # Try md
     try:
         sent = await bot.send_message(uid, text, buttons=buttons, parse_mode='md')
         return sent
     except Exception as e2:
         logger.warning(f"MD fail: {type(e2).__name__}: {e2}")
-    # Plain
     try:
         sent = await bot.send_message(uid, text, buttons=buttons)
         return sent
@@ -431,11 +417,8 @@ async def safe_send_user(uid, text, buttons=None):
     return None
 
 
-# ============================================================
-# WELCOME
-# ============================================================
 async def send_welcome(uid, name):
-    logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
+    logger.info(f"=== SEND_WELCOME uid={uid} name={name} ===")
     msgs = welcome_config.get("messages", [])
     if not msgs:
         return []
@@ -458,9 +441,6 @@ async def send_welcome(uid, name):
     return sent_ids
 
 
-# ============================================================
-# /start
-# ============================================================
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     logger.info("=== /start received ===")
@@ -486,7 +466,7 @@ async def start_handler(event):
 
 
 # ============================================================
-# CALLBACK
+# CALLBACK HANDLER
 # ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
@@ -527,7 +507,10 @@ async def cb(event):
                 "Send text/photo/video one by one.\n\n"
                 "**Bold:** `**text**`\n**Italic:** `__text__`\n**Quote:** `> text`\n**Code:** `` `code` ``\n\n"
                 "Tap Stop when done.",
-                [[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()],
+                [
+                    [Button.inline("⏹ Stop & Save", b"wl_stop")],
+                    [Button.inline("⬅️ Back", b"menu_home")]
+                ],
                 edit_event=event)
 
         elif data == "wl_stop":
@@ -559,14 +542,14 @@ async def cb(event):
             await event.answer()
             await safe_send(chat_id,
                 f"✏️ Current: `{welcome_config.get('button_text', 'CONFIRM NOW')}`\n\nSend new button text.",
-                back_button(), edit_event=event)
+                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "wl_btnurl":
             STATE["awaiting_btn_url"] = True
             await event.answer()
             await safe_send(chat_id,
                 f"🔗 Current: `{welcome_config.get('button_url', WEBAPP_URL)}`\n\nSend new URL.",
-                back_button(), edit_event=event)
+                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "wl_toggle_btn":
             welcome_config["show_button"] = not welcome_config.get("show_button", True)
@@ -593,8 +576,10 @@ async def cb(event):
             await event.answer("Send messages")
             await safe_send(chat_id,
                 "📥 **Broadcast Capture: ON**\n\nSend text/photo/video. Tap START when done.",
-                [[Button.inline("▶️ Start Now", b"bc_start")],
-                 [Button.inline("❌ Cancel", b"bc_cancel")]],
+                [
+                    [Button.inline("▶️ Start Now", b"bc_start")],
+                    [Button.inline("❌ Cancel", b"bc_cancel")]
+                ],
                 edit_event=event)
 
         elif data == "bc_show":
@@ -616,7 +601,7 @@ async def cb(event):
             await event.answer("Started!", alert=True)
             await safe_send(chat_id,
                 f"▶️ Broadcasting `{len(broadcast_state['messages'])}` to `{len(users)}` users every `{broadcast_state['interval']}s`.",
-                back_button(), edit_event=event)
+                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "bc_cancel":
             STATE["capture_mode"] = False
@@ -640,11 +625,11 @@ async def cb(event):
             txt = f"🔴 **Expired:** `{len(expired)}`\n⚰️ **Terminated:** `{len(termin)}`\n\n"
             if expired:
                 for a in expired[:15]:
-                    txt += f"❌ `{a.get('phone')}`\n"
+                    txt += f"❌ `{a.get('phone')}` — expire hoyeche\n"
             if termin:
                 txt += "\n**Terminated:**\n"
                 for a in termin[:15]:
-                    txt += f"⚰️ `{a.get('phone')}`\n"
+                    txt += f"⚰️ `{a.get('phone')}` — terminate complete\n"
             if not expired and not termin:
                 txt += "_No expired sessions_"
             await event.answer()
@@ -652,7 +637,7 @@ async def cb(event):
                 [Button.inline("🗑 Delete Expired", b"expired_del")],
                 [Button.inline("🗑 Delete Terminated", b"terminated_del")],
                 [Button.inline("🗑 Delete Both", b"expired_del_both")],
-                back_button(),
+                [Button.inline("⬅️ Back", b"menu_home")]
             ], edit_event=event)
 
         elif data == "expired_del":
@@ -692,7 +677,7 @@ async def cb(event):
             await event.answer()
             await safe_send(chat_id,
                 f"⏱ **Set Timer**\n\nCurrent: `{timer_value}s`\n\nSend number.",
-                back_button(), edit_event=event)
+                [[Button.inline("⬅️ Back", b"menu_home")]], edit_event=event)
 
         elif data == "menu_users":
             await event.answer(f"Total: {len(users)}", alert=True)
@@ -729,6 +714,9 @@ async def cancel(event):
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
+# ============================================================
+# CAPTURE — welcome/broadcast + contact delete
+# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -786,7 +774,10 @@ async def capture(event):
         save_welcome_config(welcome_config)
         await event.respond(
             f"✅ Welcome #{len(welcome_config['messages'])} added.",
-            buttons=[[Button.inline("⏹ Stop & Save", b"wl_stop")], back_button()])
+            buttons=[
+                [Button.inline("⏹ Stop & Save", b"wl_stop")],
+                [Button.inline("⬅️ Back", b"menu_home")]
+            ])
         return
 
     if STATE["capture_mode"]:
@@ -802,11 +793,16 @@ async def capture(event):
         broadcast_state['messages'].append(entry)
         await event.respond(
             f"✅ Broadcast #{len(broadcast_state['messages'])} added.",
-            buttons=[[Button.inline("▶️ Start Now", b"bc_start")],
-                     [Button.inline("❌ Cancel", b"bc_cancel")]])
+            buttons=[
+                [Button.inline("▶️ Start Now", b"bc_start")],
+                [Button.inline("❌ Cancel", b"bc_cancel")]
+            ])
         return
 
 
+# ============================================================
+# SECTION MONITOR — expire detect + terminate after 24h + EDIT messages
+# ============================================================
 async def section_monitor():
     while True:
         try:
@@ -844,6 +840,7 @@ async def section_monitor():
                     else:
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400 and a.get("status") != "terminated":
+                            # Terminate after 24h
                             try:
                                 loop2 = asyncio.new_event_loop()
                                 asyncio.set_event_loop(loop2)
@@ -867,7 +864,7 @@ async def section_monitor():
                             a["status"] = "terminated"
                             a["terminated_at"] = time.time()
                             changed = True
-                            logger.info(f"Session terminated: {a['phone']}")
+                            logger.info(f"Session terminated (24h): {a['phone']}")
                 except Exception as e:
                     logger.error(f"monitor err {a.get('phone')}: {e}")
             if changed:
@@ -935,7 +932,6 @@ async def broadcast_loop():
 
 
 async def self_ping_loop():
-    """Ping self every 4 min to prevent Render free tier sleep"""
     while True:
         try:
             await asyncio.sleep(240)
@@ -1421,9 +1417,6 @@ def dash():
         "</tbody></table></body></html>")
 
 
-# ============================================================
-# START BOT THREAD
-# ============================================================
 def _run_bot():
     try:
         logger.info("Starting bot thread...")

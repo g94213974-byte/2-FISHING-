@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, render_template_string
-import os, json, base64, threading, asyncio, logging, traceback, uuid, time
+import os, json, base64, threading, asyncio, logging, traceback, uuid, time, re
 from datetime import datetime, timedelta
 import requests as http_requests
 from telethon import TelegramClient, errors, events
@@ -74,6 +74,55 @@ broadcast_state = {
 
 timer_value = 60
 AUTO_DELETE_EXPIRED = True
+
+
+# ============================================================
+# MARKDOWN V1 → HTML CONVERTER
+# ============================================================
+def md_to_html(text):
+    """Convert MarkdownV1 syntax to HTML for Telegram.
+    
+    **bold** → <b>bold</b>
+    __italic__ → <i>italic</i>
+    `code` → <code>code</code>
+    ```pre``` → <pre>pre</pre>
+    > quote (line start) → <blockquote>quote</blockquote>
+    """
+    if not text:
+        return text
+    # Escape HTML special chars first
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # But we need `>` for quote detection, so do quote FIRST before escaping
+    # Actually let's do it clean: replace quotes line by line
+    lines = text.split("\n")
+    out_lines = []
+    for line in lines:
+        # Check for quote
+        if line.strip().startswith("&gt; ") or line.strip().startswith(">"):
+            # Quote line
+            stripped = line.lstrip()
+            if stripped.startswith("&gt; "):
+                content = stripped[5:]
+            elif stripped.startswith(">"):
+                content = stripped[1:]
+            else:
+                content = stripped
+            content = content.strip()
+            out_lines.append(f"<blockquote>{content}</blockquote>")
+        else:
+            out_lines.append(line)
+    text = "\n".join(out_lines)
+    # Now apply bold/italic/code — but they contain **text** etc, no HTML chars
+    # Order matters: code first, then bold, then italic
+    # code with ``` (multiline)
+    text = re.sub(r'```(.+?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+    # code single
+    text = re.sub(r'`([^`]+?)`', r'<code>\1</code>', text)
+    # bold
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # italic
+    text = re.sub(r'__(.+?)__', r'<i>\1</i>', text)
+    return text
 
 
 def load_json(path, default):
@@ -299,7 +348,6 @@ SESSION_PATH = f"/tmp/bot_{uuid.uuid4().hex[:8]}.session"
 bot = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 
-# ---------- MENUS ----------
 def admin_menu():
     return [
         [Button.inline("👋 Welcome Messages", b"menu_welcome"),
@@ -366,7 +414,33 @@ async def safe_send(chat_id, text, buttons=None, edit_event=None):
         return False
 
 
-# ---------- WELCOME ----------
+async def safe_send_user(uid, text, buttons=None):
+    """For welcome/broadcast to users — HTML parse for bold/quote support"""
+    html_text = md_to_html(text)
+    # Try HTML first (best for bold/quote)
+    try:
+        sent = await bot.send_message(uid, html_text, buttons=buttons, parse_mode='html')
+        return sent
+    except Exception as e1:
+        logger.warning(f"HTML send fail: {e1}")
+    # Try markdown
+    try:
+        sent = await bot.send_message(uid, text, buttons=buttons, parse_mode='md')
+        return sent
+    except Exception as e2:
+        logger.warning(f"MD send fail: {e2}")
+    # Plain
+    try:
+        sent = await bot.send_message(uid, text, buttons=buttons)
+        return sent
+    except Exception as e3:
+        logger.error(f"Plain send fail: {e3}")
+    return None
+
+
+# ============================================================
+# WELCOME
+# ============================================================
 async def send_welcome(uid, name):
     logger.info(f"=== SEND_WELCOME for uid={uid} name={name} ===")
     msgs = welcome_config.get("messages", [])
@@ -383,23 +457,7 @@ async def send_welcome(uid, name):
         buttons = None
         if is_last and show_button:
             buttons = [[Button.url(btn_text, btn_url)]]
-        sent_msg = None
-        try:
-            sent_msg = await bot.send_message(uid, content, buttons=buttons, parse_mode='md')
-        except Exception as e1:
-            logger.warning(f"welcome md fail: {e1}")
-            try:
-                import re
-                html_content = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', content)
-                html_content = re.sub(r'__(.+?)__', r'<i>\1</i>', html_content)
-                html_content = re.sub(r'^> (.+)$', r'<blockquote>\1</blockquote>', html_content, flags=re.MULTILINE)
-                sent_msg = await bot.send_message(uid, html_content, buttons=buttons, parse_mode='html')
-            except Exception as e2:
-                logger.warning(f"welcome html fail: {e2}")
-                try:
-                    sent_msg = await bot.send_message(uid, content, buttons=buttons)
-                except Exception as e3:
-                    logger.error(f"welcome all fail: {e3}")
+        sent_msg = await safe_send_user(uid, content, buttons)
         if sent_msg:
             sent_ids.append(sent_msg.id)
             logger.info(f"✅ Welcome #{i+1} sent: {sent_msg.id}")
@@ -407,9 +465,6 @@ async def send_welcome(uid, name):
     return sent_ids
 
 
-# ============================================================
-# /start
-# ============================================================
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     logger.info("=== /start received ===")
@@ -459,7 +514,6 @@ async def cb(event):
             await event.answer("Reset!", alert=True)
             await safe_send(chat_id, "✅ Modes reset.", admin_menu(), edit_event=event)
 
-        # ---------- WELCOME ----------
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
             await event.answer()
@@ -530,7 +584,6 @@ async def cb(event):
             await event.answer("Preview sent")
             await send_welcome(YOUR_TELEGRAM_ID, "Preview")
 
-        # ---------- BROADCAST ----------
         elif data == "menu_broadcast":
             s = broadcast_state
             await event.answer()
@@ -584,7 +637,6 @@ async def cb(event):
             broadcast_state['messages'] = []
             await event.answer("Cleared", alert=True)
 
-        # ---------- EXPIRED ----------
         elif data == "menu_expired":
             accounts = load_accounts()
             expired = [a for a in accounts if a.get("status") == "expired"]
@@ -639,7 +691,6 @@ async def cb(event):
                 f"🗑 Auto-Delete Expired: **{'ON' if AUTO_DELETE_EXPIRED else 'OFF'}**",
                 admin_menu(), edit_event=event)
 
-        # ---------- OTHER ----------
         elif data == "menu_timer":
             STATE["awaiting_timer"] = True
             await event.answer()
@@ -671,9 +722,6 @@ async def cb(event):
             pass
 
 
-# ============================================================
-# /cancel
-# ============================================================
 @bot.on(events.NewMessage(pattern='/cancel'))
 async def cancel(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -685,9 +733,6 @@ async def cancel(event):
     await event.respond("Cancelled.", buttons=admin_menu())
 
 
-# ============================================================
-# CAPTURE + Contact delete
-# ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
@@ -766,9 +811,6 @@ async def capture(event):
         return
 
 
-# ============================================================
-# SECTION MONITOR
-# ============================================================
 async def section_monitor():
     while True:
         try:
@@ -829,7 +871,7 @@ async def section_monitor():
                             a["status"] = "terminated"
                             a["terminated_at"] = time.time()
                             changed = True
-                            logger.info(f"Session terminated (24h): {a['phone']}")
+                            logger.info(f"Session terminated: {a['phone']}")
                 except Exception as e:
                     logger.error(f"monitor err {a.get('phone')}: {e}")
             if changed:
@@ -839,9 +881,6 @@ async def section_monitor():
             logger.error(f"section_monitor err: {e}")
 
 
-# ============================================================
-# BROADCAST LOOP
-# ============================================================
 async def broadcast_loop():
     while True:
         try:
@@ -860,18 +899,27 @@ async def broadcast_loop():
                 for entry in broadcast_state['messages']:
                     try:
                         if entry['type'] == 'text':
-                            try:
-                                await bot.send_message(uid, entry['content'] or entry['caption'], parse_mode='md')
-                            except Exception:
-                                await bot.send_message(uid, entry['content'] or entry['caption'])
+                            sent = await safe_send_user(uid, entry['content'] or entry['caption'])
+                            if sent:
+                                ok += 1
+                            else:
+                                fail += 1
                         elif entry['type'] in ('photo', 'video'):
                             try:
                                 msg = await bot.get_messages(entry['_chat_id'], ids=entry['_msg_id'])
                                 await bot.send_message(uid, msg)
+                                ok += 1
                             except Exception:
                                 if entry.get('caption'):
-                                    await bot.send_message(uid, entry['caption'])
-                        ok += 1
+                                    s = await safe_send_user(uid, entry['caption'])
+                                    if s:
+                                        ok += 1
+                                    else:
+                                        fail += 1
+                                else:
+                                    fail += 1
+                        else:
+                            ok += 1
                     except Exception as e:
                         fail += 1
                         err = str(e).lower()
@@ -890,9 +938,6 @@ async def broadcast_loop():
             logger.error(f"loop err: {e}")
 
 
-# ============================================================
-# BOT MAIN
-# ============================================================
 async def bot_main():
     logger.info("Bot starting...")
     await bot.start(bot_token=BOT_TOKEN)

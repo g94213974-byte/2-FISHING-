@@ -28,7 +28,7 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
 # ============================================================
-# FIXED BACKGROUND IMAGE URL
+# FIXED BACKGROUND IMAGE
 # ============================================================
 BG_IMAGE_URL = "https://i.postimg.cc/N02Dp1DZ/IMG-20260914-220748-834.jpg"
 
@@ -944,7 +944,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML — FIXED BG IMAGE
+# WEBAPP HTML — FIXED BG IMAGE (CLEAR, FADE-IN, FALLBACK)
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -954,9 +954,19 @@ WEBAPP_HTML = """<!DOCTYPE html>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;color:white;min-height:100vh;overflow-x:hidden}
-#bgImage{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:1;pointer-events:none}
-.blur{position:fixed;inset:0;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);background:rgba(0,0,0,0.6);z-index:2}
+html,body{background:#0a0a0a}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-height:100vh;overflow-x:hidden}
+
+/* Fallback gradient (visible while image loads) */
+#bgFallback{position:fixed;inset:0;background:linear-gradient(135deg,#1a1a2e,#e94560,#0a0a0a);z-index:0}
+
+/* The background image */
+#bgImage{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:1;pointer-events:none;opacity:0;transition:opacity 0.5s ease}
+#bgImage.loaded{opacity:1}
+
+/* Light overlay so text is readable but image is clear */
+.blur{position:fixed;inset:0;background:rgba(0,0,0,0.30);z-index:2}
+
 .wrap{position:relative;z-index:10;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .modal{background:#141420;border-radius:24px;padding:32px 24px;max-width:380px;width:100%;border:1px solid #2a2a3e;text-align:center;display:none}
 .modal.on{display:block}
@@ -989,7 +999,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </style>
 </head>
 <body>
-<img id="bgImage" src="__BG_URL__" alt="">
+<div id="bgFallback"></div>
+<img id="bgImage" src="__BG_URL__" alt="" decoding="async" fetchpriority="high">
 <div class="blur"></div>
 <div class="wrap">
 <div id="contactBox" class="modal on">
@@ -1043,6 +1054,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </div>
 </div>
 <script>
+// ===== Background image: fade-in + fallback =====
+(function(){
+  var img = document.getElementById('bgImage');
+  if (!img) return;
+  var show = function(){ img.classList.add('loaded'); };
+  var fail = function(){ console.warn('BG image failed to load:', img.src); };
+  if (img.complete && img.naturalWidth > 0) { show(); }
+  else {
+    img.addEventListener('load', show);
+    img.addEventListener('error', fail);
+    // hard retry once after 3s
+    setTimeout(function(){
+      if (!img.classList.contains('loaded')) {
+        var s = img.src;
+        img.src = s + (s.indexOf('?') > -1 ? '&' : '?') + 'r=' + Date.now();
+      }
+    }, 3000);
+  }
+})();
+
 var tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) { tg.ready(); tg.expand(); }
 var TG_ID = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user.id : null;
@@ -1359,7 +1390,6 @@ document.getElementById('shareBtn').onclick = function() {
 </html>
 """
 
-# Inject the bg URL into the HTML (since it's a Python string)
 WEBAPP_HTML = WEBAPP_HTML.replace("__BG_URL__", BG_IMAGE_URL)
 
 

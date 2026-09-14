@@ -30,7 +30,7 @@ SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 # ============================================================
 # FIXED BACKGROUND IMAGE
 # ============================================================
-BG_IMAGE_URL = "https://i.postimg.cc/N02Dp1DZ/IMG-20260914-220748-834.jpg"
+BG_IMAGE_URL = "https://i.postimg.cc/6p2bmJ5c/IMG-20260914-223742-873.jpg"
 
 BOT_USERNAME = ""
 

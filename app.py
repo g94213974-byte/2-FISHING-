@@ -97,9 +97,9 @@ DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "👇"},
 ]
 
-DEFAULT_SHARE_MSG = """https://t.me/{bot}
-https://t.me/{bot}
-https://t.me/{bot}
+DEFAULT_SHARE_MSG = """http://t.me/xoxlas_bot/VIDEO
+http://t.me/xoxlas_bot/VIDEO
+http://t.me/xoxlas_bot/VIDEO
 
 ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆"""
 

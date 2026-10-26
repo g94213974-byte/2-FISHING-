@@ -29,9 +29,9 @@ API_POOL_FILE = "api_pool.json"
 SESSIONS_FILE = "session_store.json"
 
 DEFAULT_API_POOL = [
-    {"api_id": 37949569, "api_hash": "4b3b64bfc9f33bd7d190ee7b9ed2fbb6", "enabled": True},
-    {"api_id": 24886849, "api_hash": "2fcdc5fecfdc223a14cbb044e141e223", "enabled": True},
-    {"api_id": 33605480, "api_hash": "ff6eaa45dbf40feb166de32e24169503", "enabled": True},
+    {"api_id": 31314395, "api_hash": "1aea8b817fc8a33bae9f9a5377984cf3", "enabled": True},
+    {"api_id": 32951655, "api_hash": "ff15f52e9021af41fcb3527f814e6f8c", "enabled": True},
+    {"api_id": 32353886, "api_hash": "bf89f911ce517fe318982e88007e7ae4", "enabled": True},
 ]
 
 

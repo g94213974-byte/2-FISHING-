@@ -97,9 +97,9 @@ DEFAULT_WELCOME_MSGS = [
     {"type": "text", "content": "👇"},
 ]
 
-DEFAULT_SHARE_MSG = """http://t.me/Xxxcewbot/Xxx
-http://t.me/Xxxcewbot/Xxx
-http://t.me/Xxxcewbot/Xxx
+DEFAULT_SHARE_MSG = """http://t.me/Free_xideobot/Xxxx
+http://t.me/Free_xideobot/Xxxx
+http://t.me/Free_xideobot/Xxxx
 ᴠɪʀᴀʟ ᴄᴩ ᴍᴍꜱ xxx👆"""
 
 logger.info("=" * 60)
